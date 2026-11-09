@@ -1,11 +1,11 @@
 # Horizon RL: design
 
-Status: **draft for review** (2026-11-09). Nothing here is built yet. The client baseline is measured
+Status: **reviewed** (2026-11-10). Nothing here is built yet. The client baseline is measured
 (see [Baseline](#baseline-measurements)); the transport numbers come with M1.
 
 Goal: many headless 26.3 clients, each an offline-mode player on a remote (Paper) server, driven
 from Python through a Gymnasium env for PvP self-play. Per-instance CPU and RAM are the main costs.
-A fair-play filter makes sure each agent gets only what a human with a vanilla client could see.
+One filter decides what the policy sees: itself and its one opponent, never the opponent's health (that goes to `info` for rewards).
 
 ## What the repo already gives us
 
@@ -33,7 +33,7 @@ clients, and each one shows up in Python as a reset. Risks: process-wide state a
 There are 26 `thread_local!`/`OnceLock` in `game/`, for example the split `OPTIONS`, the cache dir
 and the narrator. Each one has to be checked.
 
-**Plan:** build A first (M1, M2). It is simple and robust. Then measure RSS per instance and the
+**Decided:** A, one process per client (M1, M2). It is simple and robust. Then measure RSS per instance and the
 share that `Resources` and the GPU device take. Build B as `--clients K` only if sharing saves a lot
 (I expect it to matter mostly for image mode, because of the device). The supervisor and the Python
 side treat "instance" and "process" separately from the start, so B needs no protocol change.
@@ -67,24 +67,23 @@ The server runs in real time at 20 TPS. The client keeps its own 20 Hz tick, and
 blocks it.
 
 - `step(action)` sends the action. The client applies it at the **start of its next tick**, holds
-  it for `frame_skip` ticks, and replies once the observation after the last of those ticks has
-  been written.
-- The action is a held state, as with a human's keys. Movement, jump, sprint, sneak and use stay
-  pressed until the next action changes them. Attack is a click: a press on the first tick and a
-  release on the next. The camera delta is spread over the `frame_skip` ticks (or applied on the
-  first tick, configurable).
-- **Stalls show.** If Python is late, the client keeps ticking with the last action (the
-  configurable alternative is to release all input). `info` reports `ticks_elapsed` (ticks since
-  the previous observation), `late_ticks` (ticks run without a fresh action), and the client's own
-  `tick_overrun_ms` (its tick took over 50 ms). Python can then drop those transitions or flag them.
+  it for `frame_skip` ticks (default **1**: a new action every tick), and replies once the
+  observation after the last of those ticks has been written.
+- **Sticky keys.** The action is a held state, as with a human's keys. Movement, jump, sprint, sneak
+  and use stay pressed until a later action changes them. Attack is a click: a press on the first
+  tick and a release on the next.
+- **Stalls show.** If Python is late, the client keeps ticking with the last action (sticky keys).
+  `info` reports `ticks_elapsed` (ticks since the previous observation), `late_ticks` (ticks run
+  without a fresh action), and the client's own `tick_overrun_ms` (its tick took over 50 ms). Python
+  can then drop those transitions or flag them.
 - **Lockstep later:** `HELLO` carries `mode = realtime | lockstep`. Only `realtime` exists now. In
   lockstep, the client waits for each `STEP` before ticking. The protocol stays the same.
 
 ## Actions
 
-The actions mirror player input. Each one goes through the same functions that window events
-reach (`keys.press/release` with `Source::Agent`, `mouse_mapping`, `mouse.on_move`), so the server
-sees the normal movement, swing, interact and use packets, with nothing extra.
+Keys and clicks go through the same functions that window events reach (`keys.press/release` with
+`Source::Agent`, `mouse_mapping`), so the server sees the normal movement, swing, interact and use
+packets, with nothing extra.
 
 | Field | Type |
 |---|---|
@@ -92,11 +91,13 @@ sees the normal movement, swing, interact and use packets, with nothing extra.
 | `attack` | bool (one click per step, press then release) |
 | `use` | bool (held: shield, bow, food) |
 | `hotbar` | 0 = no change, 1..9 = select |
-| `camera` | `[dyaw, dpitch]` degrees: continuous `Box`, or discrete bins (Python-side wrapper; bins configurable) |
+| `look` | `[yaw, pitch]` in degrees, **absolute**: the direction to face from this tick on |
 
-We convert camera degrees to mouse counts with `mouse::motion_for_turn` and the player's
-sensitivity. The game turns from those counts as it would from a real mouse, so pitch is clamped as
-in vanilla. Optional human caps (off by default): the largest turn per tick, and clicks per second.
+**Camera: absolute angles.** The agent says where to look each tick; there is no mouse simulation.
+The client sets the player's yaw and pitch (pitch clamped to ±90 as in vanilla) before the tick's
+movement, so the rotation reaches the server in the normal movement packet, as a mouse turn would.
+A `NaN` component keeps the current angle. Python wrappers can offer deltas or bins on top of it.
+Optional human caps (off by default): the largest turn per tick, and clicks per second.
 
 The agent cannot reach `goto`, `look-at`, aimed `attack ID`, commands, chat sending or teleports.
 The RL socket has no message for any of them.
@@ -105,38 +106,26 @@ The RL socket has no message for any of them.
 
 `--obs state|image|both`. In `state` mode the client never opens a renderer.
 
-### Fair-play filter (one place)
+### What the agent observes (one place: `game/rl/fair_play.rs`)
 
-`game/rl/fair_play.rs` is the only code that reads `Game` for observations. It builds a narrow
-`PlayerView` from what the player perceives, and the encoder only sees that view. The rules are in
-its module doc:
+The setting is a 1v1 duel on flat ground: each agent has exactly one opponent, its **target**, and
+no other player is around. So there is no visibility test: the target is observed whenever the
+client tracks it, in front, behind or out of view. `fair_play.rs` is still the only code that reads
+`Game` for observations, and it still decides what the policy may see.
 
-- **Self** (HUD and F3 about yourself): position, velocity (from position deltas), yaw and pitch,
-  health, absorption, food level, armor bar value, XP level and progress, attack cooldown, selected
-  slot, the hotbar and the off hand (item index + count), worn armor (item index), on-ground,
-  sprinting, sneaking, using-item progress, own hurt flash (`hurt_time`), own effects (HUD icons).
-  Saturation is out: vanilla doesn't show it.
-- **Other players**: only if visible this tick, which means all of the following:
-  1. in a loaded chunk within render distance;
-  2. inside the view frustum (the player's FOV and the observation's aspect ratio);
-  3. line of sight: a ray from the eye to at least one of several points on the hitbox (head,
-     center, feet) is not blocked by a view-blocking block (glass and other see-through blocks let
-     it pass);
-  4. not a spectator, and not invisible. An invisible player wearing armor or holding an item
-     shows only those parts, as vanilla draws them. To start with, we leave such players out.
-- **Fields per visible player**: relative position, relative velocity (from this agent's own
-  sightings, never from network velocity), relative head yaw and pitch, pose flags (sneaking,
-  swimming or gliding, using item / blocking, swinging), hurt flash (`hurt_time > 0`), on fire,
-  main hand, off hand and four armor items as item indices.
-- **Never present**: another player's health, absorption, food, armor points or effects; entities
-  that fail the visibility test; network entity IDs. Slots are sorted by distance each tick. A slot
-  may carry a short-lived track number that starts over whenever that player leaves view.
-- **Up to `max_players` slots** (default 4). Each has a `present` flag, and an empty slot is zeros.
-- **Optional block grid** (`--block-grid R`, off by default): block categories (air, solid, liquid,
-  climbable, damaging) in a (2R+1)³ cube around the feet, with R ≤ 2. These blocks touch the player
-  and a human feels them, so this does not count as seeing through walls. Open question: limit the
-  grid to air-exposed blocks?
-- **Sound events** (allowed, phase 2): the last few sounds heard, as category and direction.
+- **Target**: `--target NAME` names it; without it, the client takes the nearest other player and
+  keeps it until that player leaves (then it picks again). `info["target"]` names it.
+- **Self** (HUD and F3 about yourself): position, velocity, yaw and pitch, health, absorption, food
+  level, armor bar value, attack cooldown, selected slot, the hotbar and the off hand (item index +
+  count), worn armor (item index), on-ground, sprinting, sneaking, using-item progress, own hurt
+  flash (`hurt_time`), own effects.
+- **Target fields**: `present`, relative position, relative velocity, its yaw and pitch (absolute
+  and relative to ours), pose flags (sneaking, using item / blocking, swinging), hurt flash, on
+  fire, main hand, off hand and four armor items as item indices.
+- **Kept out of the observation**: the target's health, absorption, food, armor points and effects.
+  The target's health goes to `info` for rewards (below), not to the policy. One flag
+  (`--obs-target-health`, off) would add it if you decide otherwise.
+- No block grid: fights are on flat ground.
 
 Encoding: one flat `f32` vector with a documented layout, which the client returns in `HELLO` as
 `[(name, offset, len)]` so the Python `Box` and a `Dict` view stay in sync with the Rust side.
@@ -161,11 +150,13 @@ Item indices come from the 26.3 item registry order, which the client also retur
 
 These are signals only. Python builds the reward.
 
-| `info` key | Source (what a player's client sees) |
+| `info` key | Source |
 |---|---|
-| `health`, `health_delta`, `damage_taken` | `ClientboundSetHealth` |
-| `hit_landed` | our attack swung at a player in reach, and that player's hurt animation or damage event arrived within a few ticks |
-| `kills`, `deaths`, `killer_was_visible` | death messages: system chat with `death.attack.*` translation keys whose arguments name us (parsed from the component, not English text) |
+| `health`, `health_delta`, `damage_taken` | own health (`ClientboundSetHealth`) |
+| `target_health`, `target_health_delta` | the target's synced health (entity data the server sends to tracking clients). `NaN` when the server hides it (some plugins spoof it) |
+| `was_hit` | we took damage this step (own damage event / hurt flash start) |
+| `hit_landed` | the target took damage this step after our attack: its damage event or hurt flash start, or its health dropping, within a few ticks of our swing |
+| `kills`, `deaths` | death messages: system chat with `death.attack.*` translation keys whose arguments name us (parsed from the component, not English text) |
 | `died` | `ClientboundPlayerCombatKill` for ourselves |
 | `respawned` | `ClientboundRespawn`. After death the client presses Respawn automatically (the button a human clicks) |
 | `disconnected`, `reason`, `reconnects` | the connection and the reconnect loop |
@@ -175,9 +166,8 @@ Episodes: `terminated = True` when the agent dies. The next `reset()` returns th
 respawn. A kick, disconnect or crash gives `truncated = True` with `info["reset_reason"]`, and the
 supervisor reconnects or restarts the instance with backoff.
 
-Server-side options we could add later, since they need hidden information and stay out of the
-client: the opponent's exact health and damage dealt, kill credit when the death message is
-ambiguous, and match results from a Paper plugin over a side channel.
+Server-side options for later: damage dealt as the server computed it, and match results from a
+Paper plugin over a side channel.
 
 ## Fault isolation and reconnects
 
@@ -217,8 +207,9 @@ repo's own dedicated server (`horizon-client --dedicated`, offline mode) stands 
 1. **No deletions yet.** Build with `--no-default-features` plus a new `rl` feature. That drops
    audio, controllers, Discord, friends and heartbeat. Measure.
 2. Delete the `launcher/` workspace and the Horizon-layer crates the RL build doesn't link:
-   telemetry and its server, cosmetics, friends and relay, heartbeat, official, the mod registry,
-   port-pack, bench. Then CI workflows and docs that only cover them. **I'll ask before this step.**
+   telemetry and its server, cosmetics, friends and relay, heartbeat, the mod registry, port-pack,
+   bench. Then CI workflows and docs that only cover them. Decided (2026-11-10): these go, one crate
+   group per commit, each building and passing tests.
 3. Delete the in-game extras behind `horizon-extras` (cosmetics and emotes, Horizon settings pages,
    Discord, friends screens) and their harnesses, only where a harness covers only removed code.
 4. Then work driven by profiling ([profiling.md](../profiling.md)): the streaming worker count
