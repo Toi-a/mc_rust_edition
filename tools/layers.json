@@ -29,6 +29,7 @@
     "horizon-server-files": "engine",
     "horizon-system": "engine",
     "horizon-threads": "engine",
+    "horizon-rl-proto": "engine",
     "horizon-world": "engine",
 
     "cargo-horizon-mod": "platform",

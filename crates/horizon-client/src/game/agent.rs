@@ -5,6 +5,8 @@
 //! time out, so `horizon-ctl break 10 64 3` returns what the block dropped.
 #[path = "agent_navigation.rs"]
 mod navigation;
+#[path = "rl/mod.rs"]
+pub(super) mod rl;
 
 use super::event_loop::EventLoopCtl;
 use super::{Game, Screen};
@@ -327,6 +329,8 @@ struct Glide {
 #[derive(Default)]
 pub(super) struct Agent {
     task: Option<Task>,
+    /// The RL session (`--rl-socket`, `agent/rl/`).
+    rl: Option<Box<rl::Session>>,
     glide: Option<Glide>,
     /// Control-fixture barrier: hold simulation and packet handling, not transport threads.
     pub hold_server: bool,

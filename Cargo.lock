@@ -1457,6 +1457,7 @@ dependencies = [
  "horizon-narrator",
  "horizon-optifine",
  "horizon-protocol",
+ "horizon-rl-proto",
  "horizon-server-files",
  "horizon-shader-api",
  "horizon-shaders",
@@ -1888,6 +1889,10 @@ dependencies = [
 
 [[package]]
 name = "horizon-render-pipeline"
+version = "0.1.0"
+
+[[package]]
+name = "horizon-rl-proto"
 version = "0.1.0"
 
 [[package]]

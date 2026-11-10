@@ -6,6 +6,7 @@ members = [
     "crates/horizon-dualsense",
     "crates/horizon-narrator",
     "crates/horizon-threads",
+    "crates/horizon-rl-proto",
     "crates/horizon-hdr",
     "crates/horizon-world",
     "crates/horizon-client",

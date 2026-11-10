@@ -43,23 +43,34 @@ side treat "instance" and "process" separately from the start, so B needs no pro
 Each client gets one **Unix domain socket** for control and one **shared-memory region** (a file in
 `/dev/shm`, mmapped by both sides) for observations.
 
-- Shared memory holds a header (`magic`, `version`, `tick`, `seq`, flags), the fixed-layout `f32`
-  state vector, the `u8` grayscale frame (double-buffered), and a fixed-size info block. Python
-  reads them as zero-copy numpy views.
-- The socket carries small binary messages (little-endian, fixed size). `HELLO` sends the config,
-  `STEP{seq, action, frame_skip}`, `RESET`, `CLOSE`. Each reply is `READY{seq, tick}` after the
-  client writes the observation. A dead socket means the instance died. That gives us fault
-  detection for free.
+- Shared memory holds a 64-byte header (`HZRL`, version, `seq`, `tick`, the layout's offsets),
+  the `f32` state vector, the `f32` info vector, and (M3) the `u8` frame. Python maps it once and
+  reads numpy views. The game writes it before `READY` and not again until the next step ends, so
+  no lock is needed.
+- The socket carries `[kind u32][len u32][payload]` messages, little-endian. `HELLO{version,
+  frame_skip}` gets `WELCOME`: JSON with the shm path, the state and info fields as `[name,
+  offset, len]`, the item registry and the player's name, so Python never hard-codes the layout.
+  Then `STEP{seq, frame_skip, buttons, hotbar, yaw, pitch}` (28 bytes), `RESET`, `CLOSE`; each
+  step or reset is answered by `READY{seq, tick}`. A dead socket means the instance died.
+  The format lives in one crate, `crates/horizon-rl-proto`.
 - Why not the others:
   - **PyO3:** it would put the game in the Python process (or need a broker), which loses
     process isolation and adds the GIL.
   - **ZeroMQ:** it adds a native dependency on both sides and gives nothing over UDS for local
     one-to-one links.
-  - **The JSON socket:** parsing and formatting the full entity list costs too much per step.
-- **To measure** (M1, `python/bench/transport.py`): round-trip time and CPU per step for (1)
-  `horizon-ctl state` JSON and (2) binary UDS + shm, at 1/10/30 instances. I expect a few µs for
-  UDS against roughly 1 ms for JSON. Either is small next to a 50 ms tick, but the CPU cost × N is
-  what matters. The doc gets the real numbers.
+  - **The JSON control socket:** measured below. It answers once per frame, so the two requests
+    an observation needs (`state`, `entities`) take two frames: it can't keep up with 20 Hz.
+
+**Measured** (2026-11-10, `python/bench/transport.py --seconds 30`; one headless client and a second
+player on the local server; one observation per tick):
+
+| | Binary UDS + shm | JSON control socket (`state` + `entities 32`) |
+|---|---|---|
+| Observations/s | **20.0** (every tick) | 10.0 (one request per frame) |
+| Python CPU per observation | **78 µs** | 229 µs |
+| Game CPU (idle: 0.87 %) | **0.87 %** (no measurable cost) | 1.03 % |
+| Bytes per observation | 400 | 2 116 |
+| Wait from request to answer (median) | 50 ms (the tick) | 100 ms (two frames) |
 
 ## Timing
 
@@ -70,8 +81,8 @@ blocks it.
   it for `frame_skip` ticks (default **1**: a new action every tick), and replies once the
   observation after the last of those ticks has been written.
 - **Sticky keys.** The action is a held state, as with a human's keys. Movement, jump, sprint, sneak
-  and use stay pressed until a later action changes them. Attack is a click: a press on the first
-  tick and a release on the next.
+  and use stay pressed until a later action changes them. Attack is a click: a press and a release
+  at the start of the step's first tick (the press is what attacks, as `Minecraft.startAttack`).
 - **Stalls show.** If Python is late, the client keeps ticking with the last action (sticky keys).
   `info` reports `ticks_elapsed` (ticks since the previous observation), `late_ticks` (ticks run
   without a fresh action), and the client's own `tick_overrun_ms` (its tick took over 50 ms). Python
@@ -222,8 +233,11 @@ harnesses for those, the dedicated server (it's the stand-in).
 
 ## Where the code goes
 
-- `crates/horizon-client/src/game/rl/`: `mod.rs` (session, socket, tick hook), `fair_play.rs`
-  (the filter), `obs.rs` (encoding), `action.rs`, `signals.rs` (info), behind a Cargo feature `rl`.
+- `crates/horizon-client/src/game/rl/` (the module `game::agent::rl`, kept beside the other agent
+  surfaces): `mod.rs` (session, socket, actions, info signals) and `fair_play.rs` (the filter and
+  the state encoding). No Cargo feature: without `--rl-socket` the hooks are one `None` check. The
+  hooks stay out of the big files (`game.rs` only calls `rl_tick`; damage comes through
+  `pvp_hurt`, deaths from the alive→dead change, kills from the chat's new death messages).
 - `crates/horizon-rl-proto/`: the wire and shm layout, with no dependencies, so the format is in
   one place and its tests run quickly.
 - `python/horizon_rl/`, `docs/rl/README.md`.
@@ -234,7 +248,7 @@ Measured 2026-11-09 on the target desktop (16 threads, 23 GB RAM, Linux 7.3, Mes
 branch point `7eb057384c`. One local `horizon-client --dedicated` (offline, peaceful, view distance 10). Each
 client joins with `--server 127.0.0.1:PORT --name …` and fresh `HORIZON_HOME`/XDG/game folders, then stands still
 at spawn. After a 15 s settle, it is sampled for 40 s from `/proc` (CPU = utime+stime of all threads, % of one core).
-Script: `python/bench/baseline.py` (lands with M1).
+Script: `python/bench/baseline.py`.
 
 | Client | CPU % (1 core) | RSS MB | PSS MB | Threads | Join s |
 |---|---|---|---|---|---|
@@ -257,4 +271,4 @@ What this says:
   offscreen device adds ~200 MB per process, as expected.
 - **Threads to cut**: headless still starts 15 streaming workers and the controller backend (it found a
   gamepad). Both are candidates for M1/M5 defaults (`--workers 1`, no gamepad).
-- Still to measure: the transport (JSON ctl vs binary UDS+shm, M1), and CPU under motion and combat (M2).
+- Still to measure: CPU under motion and combat, and many instances at once (M2).

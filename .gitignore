@@ -35,3 +35,9 @@
 
 # Release-only compiled original exporter bundle.
 /exporters/
+
+# The RL Python package (python/): its virtualenv and build files.
+/python/.venv/
+/python/*.egg-info/
+/python/build/
+__pycache__/

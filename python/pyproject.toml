@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "horizon-rl"
+version = "0.1.0"
+description = "Gymnasium environments over headless Horizon (Minecraft 26.3) clients, for PvP self-play"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "gymnasium>=0.29"]
+
+[project.optional-dependencies]
+bench = ["psutil>=5.9"]
+
+[tool.setuptools]
+packages = ["horizon_rl"]
