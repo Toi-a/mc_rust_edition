@@ -73,6 +73,10 @@ fn apply(m: &mut Mob, values: &[(u8, i32, Value)], builtin: &Builtin, local_enti
             // LivingEntity.DATA_HEALTH_ID: the boss bars and the death
             // animation follow it.
             (9, Value::Float(health)) => m.health = *health,
+            // Player.DATA_PLAYER_ABSORPTION_ID: another player's golden hearts.
+            (17, Value::Float(amount)) if &*m.kind.id == "minecraft:player" => {
+                m.absorption = *amount
+            }
             // LivingEntity.DATA_EFFECT_PARTICLES and DATA_EFFECT_AMBIENCE_ID:
             // the swirls of its effects (`tickEffects` draws them).
             (10, Value::Particles(list)) => m.extra.effect_particles = swirls(list, builtin),

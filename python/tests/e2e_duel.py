@@ -47,7 +47,6 @@ def main():
             f = lambda name: env.field(state, name)  # noqa: E731
             check(info["alive"] == 1 and info["connected"] == 1, "reset: alive and connected")
             check(f("self_health")[0] == 20.0, f"own health is in the observation ({f('self_health')})")
-            check("target_health" not in env.state_fields, "no target health in the state layout")
 
             # Facing: absolute yaw and pitch.
             state, info = env.step(yaw=90.0, pitch=10.0)
@@ -73,6 +72,9 @@ def main():
             state, info = seen
             check(f("target_present")[0] == 1.0 and info["target_present"] == 1, "the opponent is observed")
             check(math.isfinite(info["target_health"]), f"its health is in info ({info['target_health']})")
+            # (No --rl-target-health here: this server doesn't show players each other's health.)
+            check(f("target_health")[0] == 0.0 and f("target_absorption")[0] == 0.0 and info["target_health"] > 0,
+                  "and not in the observation, unless the run says the server shows it")
             sword = env.items.index("minecraft:diamond_sword") + 1
             slot = list(f("self_hotbar_item")).index(sword) + 1 if sword in f("self_hotbar_item") else 1
             state, info = env.step(0, hotbar=slot)

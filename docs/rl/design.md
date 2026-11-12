@@ -7,7 +7,7 @@ envs (M4, [measured](#m4-measurements)); removal (M5) is next.
 
 Goal: many headless 26.3 clients, each an offline-mode player on a remote (Paper) server, driven
 from Python through a Gymnasium env for PvP self-play. Per-instance CPU and RAM are the main costs.
-One filter decides what the policy sees: itself and its one opponent, never the opponent's health (that goes to `info` for rewards).
+One filter decides what the policy sees: itself and its one opponent, and of the opponent only what a person playing on that server would know.
 
 ## What the repo already gives us
 
@@ -153,28 +153,44 @@ The RL socket has no message for any of them.
 
 ### What the agent observes (one place: `game/rl/fair_play.rs`)
 
+**The fair-play rule** (revised 2026-11-12): the policy may know what a person playing on the
+same server knows, and act with a player's inputs. The base is a vanilla client. What the
+training server shows its players on top of that can be added, per run, by a named switch that is
+off by default. Training aids that go beyond it are also per-run switches, and are named as such.
+
+| | Default | Per-run switch |
+|---|---|---|
+| The opponent's health and absorption | hidden (zero in the state; health is in `info` for rewards) | `target_health` (`--rl-target-health`): for servers that show every player's health above the name, as PvP servers do |
+| Aiming | the policy turns the camera itself | `camera="aim"`: the env faces the opponent (a training aid for a first stage, not something a player has) |
+| The opponent's food, armor points, effects; entity ids; other entities | hidden | none: the state has no field for them |
+| Actions other than a player's keys, clicks and camera | none | none: the RL socket has no message for them |
+
 The setting is a 1v1 duel on flat ground: each agent has exactly one opponent, its **target**, and
 no other player is around. So there is no visibility test: the target is observed whenever the
-client tracks it, in front, behind or out of view. `fair_play.rs` is still the only code that reads
-`Game` for observations, and it still decides what the policy may see.
+client tracks it, in front, behind or out of view. `fair_play.rs` is the only code that reads
+`Game` for observations: every switch above that concerns observations is decided there.
 
-- **Target**: `--target NAME` names it; without it, the client takes the nearest other player and
-  keeps it until that player leaves (then it picks again). `info["target"]` names it.
+- **Target**: `--rl-target NAME` names it; without it, the client takes the nearest other player
+  and keeps it until that player leaves (then it picks again).
 - **Self** (HUD and F3 about yourself): position, velocity, yaw and pitch, health, absorption, food
   level, armor bar value, attack cooldown, selected slot, the hotbar and the off hand (item index +
-  count), worn armor (item index), on-ground, sprinting, sneaking, using-item progress, own hurt
-  flash (`hurt_time`), own effects.
-- **Target fields**: `present`, relative position, relative velocity, its yaw and pitch (absolute
-  and relative to ours), pose flags (sneaking, using item / blocking, swinging), hurt flash, on
-  fire, main hand, off hand and four armor items as item indices.
-- **Kept out of the observation**: the target's health, absorption, food, armor points and effects.
-  The target's health goes to `info` for rewards (below), not to the policy. One flag
-  (`--obs-target-health`, off) would add it if you decide otherwise.
+  count), worn armor (item index), on-ground, sprinting, sneaking, using an item, own hurt
+  flash (`hurt_time`), alive. (Own effects aren't in it yet.)
+- **Target fields**: `present`, relative position, relative velocity, distance, its yaw and
+  pitch, the bearing to it, pose flags (sneaking, sprinting, using item / blocking, swinging),
+  hurt flash, on fire, main hand, off hand and four armor items as item indices; and, with the
+  switch, its health and absorption (from the entity data every tracking client gets).
 - No block grid: fights are on flat ground.
 
-Encoding: one flat `f32` vector with a documented layout, which the client returns in `HELLO` as
-`[(name, offset, len)]` so the Python `Box` and a `Dict` view stay in sync with the Rust side.
-Item indices come from the 26.3 item registry order, which the client also returns.
+Encoding: one flat `f32` vector with a documented layout (70 values), which the client returns
+in `WELCOME` as `[(name, offset, len)]`, so Python never hard-codes it. Item indices come from the
+26.3 item registry order, which the client also returns.
+
+**The policy's input is chosen in Python** (`python/horizon_rl/observations.py`, decided
+2026-11-12 for training in stages): `observation=` lists the features an env returns, from the
+state's fields and derived ones (vectors in the agent's own forward/right/up frame, angles as
+sine and cosine), each divided by its usual range unless `normalize=False`. This layer only
+selects and rescales what the filter already let through; it can't add information.
 
 ### Images
 
@@ -214,7 +230,7 @@ These are signals only. Python builds the reward.
 | `info` key | Source |
 |---|---|
 | `health`, `health_delta`, `damage_taken` | own health (`ClientboundSetHealth`) |
-| `target_health`, `target_health_delta` | the target's synced health (entity data the server sends to tracking clients). `NaN` when the server hides it (some plugins spoof it) |
+| `target_health`, `target_damage` | the target's synced health (entity data the server sends to tracking clients) and what it lost this step. Always in `info`, whatever the observation has |
 | `was_hit` | we took damage this step (own damage event / hurt flash start) |
 | `hit_landed` | the target took damage this step after our attack: its damage event or hurt flash start, or its health dropping, within a few ticks of our swing |
 | `kills`, `deaths` | death messages: system chat with `death.attack.*` translation keys whose arguments name us (parsed from the component, not English text) |

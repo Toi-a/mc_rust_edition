@@ -6,7 +6,8 @@ the policy more of the controls each time.
     python python/examples/train_sb3.py --local -n 4 --steps 20000          # a local try-out
 
 Stages (`STAGES` below; add your own):
-- `sword`: forward, back, jump and attack; the env aims at the opponent for the policy.
+- `sword`: forward, back, jump and attack; the env aims at the opponent for the policy. It
+  observes 16 normalised numbers, the opponent's health among them (a server that shows it).
 - `aim`: the same keys plus strafing and sprint, and the policy turns the camera itself (bins).
 - `full`: every key, the hotbar and the camera.
 
@@ -26,10 +27,12 @@ from stable_baselines3.common.vec_env import VecMonitor  # noqa: E402
 from horizon_rl import HorizonVecEnv, rewards  # noqa: E402
 from horizon_rl.sb3 import HorizonSB3VecEnv, ReleaseKeys  # noqa: E402
 
-# The action settings of each stage (horizon_rl.actions.ActionCodec). `flat=True`: SB3 takes no
-# Dict action space.
+# The action settings of each stage (horizon_rl.actions.ActionCodec) and what it observes
+# (horizon_rl.observations; none given: the game's whole state vector, raw). `flat=True`: SB3
+# takes no Dict action space.
 STAGES = {
-    "sword": dict(camera="aim", buttons=("forward", "back", "jump", "attack"), hotbar=False),
+    "sword": dict(camera="aim", buttons=("forward", "back", "jump", "attack"), hotbar=False,
+                  observation="sword"),  # a small normalised view, with the opponent's health
     "aim": dict(camera="bins", hotbar=False,
                 buttons=("forward", "back", "left", "right", "jump", "sprint", "attack")),
     "full": dict(camera="bins"),

@@ -270,6 +270,10 @@ pub const STATE: &[Field] = &[
     f("target_main_hand", 1),
     f("target_off_hand", 1),
     f("target_armor_item", 4),
+    // Only with `--rl-target-health` (a server that shows every player's health, as PvP servers
+    // do above the name); zero otherwise.
+    f("target_health", 1),
+    f("target_absorption", 1),
 ];
 
 /// The info vector: signals for rewards and bookkeeping, never part of the observation.
@@ -510,7 +514,7 @@ mod tests {
         assert_eq!(offset(STATE, "self_pos"), 0);
         assert_eq!(offset(STATE, "self_vel"), 3);
         assert_eq!(
-            offset(STATE, "target_armor_item") + 4,
+            offset(STATE, "target_absorption") + 1,
             STATE_LEN,
             "the last field ends the vector"
         );
@@ -518,9 +522,15 @@ mod tests {
 
     #[test]
     fn nothing_hidden_in_the_state_layout() {
-        // The fair-play rule at the format level: the opponent's health, food, armor points and
-        // effects have no place in the observation (they go to `info`, for rewards only).
+        // The fair-play rule at the format level: of what a vanilla client hides about the
+        // opponent, only its health and absorption have a place in the observation, for servers
+        // that show them (`--rl-target-health`; zero otherwise). Food, armor points, effects and
+        // entity ids have none.
+        const SHOWN_BY_SOME_SERVERS: [&str; 2] = ["target_health", "target_absorption"];
         for field in STATE.iter().filter(|f| f.name.starts_with("target_")) {
+            if SHOWN_BY_SOME_SERVERS.contains(&field.name) {
+                continue;
+            }
             for hidden in [
                 "health",
                 "food",
@@ -535,6 +545,9 @@ mod tests {
                     field.name
                 );
             }
+        }
+        for name in SHOWN_BY_SOME_SERVERS {
+            assert!(STATE.iter().any(|f| f.name == name), "{name}");
         }
     }
 

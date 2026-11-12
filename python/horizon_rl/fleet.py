@@ -54,6 +54,9 @@ class FleetConfig:
     # Images: (width, height), the width a multiple of 4; `hud` draws the HUD in them.
     image_size: tuple = (64, 64)
     hud: bool = False
+    # The server shows its players each other's health (PvP servers do, above the name): the
+    # state then has the opponent's health and absorption (`--rl-target-health`).
+    target_health: bool = False
     frame_skip: int = 1
     render_distance: int = 2
     # Worker threads per client (chunk streaming jobs). Headless needs few.
@@ -169,6 +172,8 @@ class Fleet:
         target = c.target_of(slot.index)
         if target:
             extra += ["--rl-target", target]
+        if c.target_health:
+            extra.append("--rl-target-health")
         env = {"HORIZON_JOB_THREADS": str(c.workers), "HORIZON_WORKER_THREADS": str(c.workers)}
         render_options = None
         if c.images:

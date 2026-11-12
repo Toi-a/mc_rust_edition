@@ -1,6 +1,10 @@
 //! What the policy may see: the only code that reads `Game` for an RL observation
 //! (docs/rl/design.md#what-the-agent-observes-one-place-gamerlfair_playrs).
 //!
+//! The rule: the policy may know what a person playing on the same server knows. The base is a
+//! vanilla client; what the training server shows its players on top of that is added per run,
+//! by a switch named here, never by default.
+//!
 //! The setting is a 1v1 duel on flat ground, so there is no visibility test: the agent's one
 //! opponent (its *target*) is observed whenever this client tracks it. The rules:
 //!
@@ -10,9 +14,12 @@
 //! - **Target**: what you see of another player: where it is and how it moves, where it looks,
 //!   its pose (sneaking, sprinting, using an item, swinging), the hurt flash, fire, and what it
 //!   holds and wears.
-//! - **Never**: the target's health, absorption, food, armor points or effects, or any network
-//!   entity id. [`TargetView`] has no field for them, so [`encode`] can't write them; the target's
-//!   health goes to `info` (rewards only) by a separate path in `mod.rs`.
+//! - **Only where the server shows it** (`--rl-target-health`): the target's health and
+//!   absorption. PvP servers draw every player's health above the name, so there a person knows
+//!   it. Without the switch [`TargetView::shown_health`] is `None` and both fields stay zero; the
+//!   target's health still goes to `info` (rewards only) by a separate path in `mod.rs`.
+//! - **Never**: the target's food, armor points or effects, or any network entity id.
+//!   [`TargetView`] has no field for them, so [`encode`] can't write them.
 //! - No other entity: one opponent, no block grid.
 
 use horizon_client::mobs::Mob;
@@ -64,15 +71,20 @@ pub(super) struct TargetView {
     pub main_hand: u32,
     pub off_hand: u32,
     pub armor_items: [u32; 4],
+    /// Health and absorption, only on a server that shows them to its players
+    /// (`--rl-target-health`).
+    pub shown_health: Option<(f32, f32)>,
 }
 
 impl TargetView {
     /// What is visible of `m`. `item` turns an item name into its id + 1 (0 = none);
-    /// `previous` is where this client saw it last tick, for its velocity.
+    /// `previous` is where this client saw it last tick, for its velocity; `health_shown` says
+    /// the server shows its players each other's health.
     pub(super) fn of(
         m: &Mob,
         previous: Option<[f64; 3]>,
         item: impl Fn(Option<&str>) -> u32,
+        health_shown: bool,
     ) -> Self {
         let pos = [m.position.x, m.position.y, m.position.z];
         let vel = seen_velocity(pos, previous);
@@ -97,6 +109,7 @@ impl TargetView {
                 item(e.legs.as_deref()),
                 item(e.feet.as_deref()),
             ],
+            shown_health: health_shown.then_some((m.health, m.absorption)),
         }
     }
 }
@@ -197,6 +210,10 @@ pub(super) fn encode(me: &SelfView, target: Option<&TargetView>, out: &mut [f32;
     put("target_main_hand", &[t.main_hand as f32]);
     put("target_off_hand", &[t.off_hand as f32]);
     put("target_armor_item", &t.armor_items.map(|i| i as f32));
+    if let Some((health, absorption)) = t.shown_health {
+        put("target_health", &[health]);
+        put("target_absorption", &[absorption]);
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +253,20 @@ mod tests {
         assert_eq!(&out[rel..rel + 3], &[3.0, 0.0, 4.0]);
         assert_eq!(at("target_distance"), 5.0);
         assert_eq!(at("target_main_hand"), 1001.0);
+    }
+
+    #[test]
+    fn the_opponents_health_is_seen_only_where_the_server_shows_it() {
+        let hidden = observe(&opponent_at([3.0, 64.0, 4.0]));
+        let at = |out: &[f32; STATE_LEN], name| out[offset(STATE, name)];
+        assert_eq!(at(&hidden, "target_health"), 0.0);
+        assert_eq!(at(&hidden, "target_absorption"), 0.0);
+        let shown = observe(&TargetView {
+            shown_health: Some((13.5, 4.0)),
+            ..opponent_at([3.0, 64.0, 4.0])
+        });
+        assert_eq!(at(&shown, "target_health"), 13.5);
+        assert_eq!(at(&shown, "target_absorption"), 4.0);
     }
 
     #[test]

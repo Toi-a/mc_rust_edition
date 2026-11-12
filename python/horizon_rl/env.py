@@ -3,9 +3,10 @@
 - `HorizonVecEnv`: N agents stepped together, each an independent player on the server.
 - `HorizonEnv`: one agent.
 
-Observations follow `FleetConfig.obs`: `"state"` a float32 vector (the fair-play view; the layout
-is `env.state_fields`, name -> slice), `"image"` an (H, W) uint8 frame, `"both"` a dict of the
-two. Actions: `horizon_rl.actions.ActionCodec` (buttons, hotbar, camera). Rewards: 0 unless a
+Observations follow `FleetConfig.obs`: `"state"` a float32 vector, `"image"` an (H, W) uint8
+frame, `"both"` a dict of the two. The state is the game's whole fair-play vector
+(`env.state_fields`: name -> slice), or with `observation=` the features you list, normalised
+unless `normalize=False` (`horizon_rl.observations`; `env.observation_fields` says where each is). Actions: `horizon_rl.actions.ActionCodec` (buttons, hotbar, camera). Rewards: 0 unless a
 `reward` function is given (`horizon_rl.rewards`); every signal is in `info`.
 
 The server runs in real time, so nothing here blocks on one agent: an agent whose episode ended
@@ -20,6 +21,7 @@ from gymnasium.vector.utils import batch_space
 
 from .actions import BUTTON_NAMES, DEFAULT_BINS, DEFAULT_MAX_TURN, ActionCodec
 from .fleet import Fleet, FleetConfig
+from .observations import ObservationView
 
 # The action settings of the envs (`ActionCodec`'s), and their defaults.
 _CODEC_DEFAULTS = {"camera": "absolute", "buttons": BUTTON_NAMES, "hotbar": True, "flat": False,
@@ -36,8 +38,17 @@ def _encode(codec, actions, states, fields):
 
 
 def _open(config, fleet, n, settings):
-    """The started fleet of an env, and the action settings left in `settings`."""
+    """The started fleet of an env, its action settings and its observation view (None: the
+    whole state vector as the game gives it)."""
     codec = {k: settings.pop(k, v) for k, v in _CODEC_DEFAULTS.items()}
+    observation, normalize = settings.pop("observation", None), settings.pop("normalize", True)
+    view = None if observation is None else ObservationView(observation, normalize)
+    if view is not None and view.needs_target_health:
+        # Asking for the opponent's health is saying the server shows it.
+        if fleet is None:
+            settings["target_health"] = True
+        elif not fleet.config.target_health:
+            raise ValueError("the observation has the opponent's health: start the fleet with target_health=True")
     if fleet is None:
         if config is None:
             config = FleetConfig(**settings)
@@ -50,15 +61,17 @@ def _open(config, fleet, n, settings):
         raise TypeError(f"settings given with a fleet: {', '.join(settings)}")
     try:
         fleet.start()
+        if view is not None:
+            view.bind(fleet.state_fields)
     except BaseException:
         fleet.close()
         raise
-    return fleet, codec
+    return fleet, codec, view
 
 
-def _observation_space(fleet):
+def _observation_space(fleet, view):
     config = fleet.config
-    state = gym.spaces.Box(-np.inf, np.inf, (fleet.state_len,), np.float32)
+    state = gym.spaces.Box(-np.inf, np.inf, (view.size if view else fleet.state_len,), np.float32)
     if config.obs == "state":
         return state
     w, h = config.image_size
@@ -87,15 +100,17 @@ class HorizonVecEnv(VectorEnv):
     metadata = {"render_modes": [], "autoreset_mode": AutoresetMode.NEXT_STEP}
 
     def __init__(self, config=None, *, reward=None, fleet=None, **settings):
-        self.fleet, codec = _open(config, fleet, None, settings)
+        self.fleet, codec, self.view = _open(config, fleet, None, settings)
         self.config = self.fleet.config
         self.num_envs = n = self.config.n
         self.reward_fn = reward
         self.state_fields = self.fleet.state_fields
+        # Where each feature is in a state observation (the game's layout, or the chosen one).
+        self.observation_fields = self.view.fields if self.view else self.state_fields
         self.items = self.fleet.items
         self.names = [slot.name for slot in self.fleet.slots]
         self.codec = ActionCodec(n, frame_skip=self.config.frame_skip, **codec)
-        self.single_observation_space = _observation_space(self.fleet)
+        self.single_observation_space = _observation_space(self.fleet, self.view)
         self.single_action_space = self.codec.space
         self.observation_space = batch_space(self.single_observation_space, n)
         self.action_space = batch_space(self.single_action_space, n)
@@ -106,11 +121,10 @@ class HorizonVecEnv(VectorEnv):
 
     def _observations(self):
         obs = self.config.obs
-        if obs == "state":
-            return self._states.copy()
         if obs == "image":
             return self._frames.copy()
-        return {"state": self._states.copy(), "image": self._frames.copy()}
+        state = self.view.build(self._states) if self.view else self._states.copy()
+        return state if obs == "state" else {"state": state, "image": self._frames.copy()}
 
     def _keep(self, states, rows):
         self._states[rows] = states[rows]
@@ -187,7 +201,7 @@ class HorizonEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, config=None, *, reward=None, fleet=None, reset_timeout=120.0, **settings):
-        self.fleet, codec = _open(config, fleet, 1, settings)
+        self.fleet, codec, self.view = _open(config, fleet, 1, settings)
         self.config = self.fleet.config
         if self.config.n != 1:
             self.fleet.close()
@@ -195,21 +209,21 @@ class HorizonEnv(gym.Env):
         self.reward_fn = reward
         self.reset_timeout = reset_timeout
         self.state_fields = self.fleet.state_fields
+        self.observation_fields = self.view.fields if self.view else self.state_fields
         self.items = self.fleet.items
         self.name = self.fleet.slots[0].name
         self.codec = ActionCodec(1, frame_skip=self.config.frame_skip, **codec)
-        self.observation_space = _observation_space(self.fleet)
+        self.observation_space = _observation_space(self.fleet, self.view)
         self.action_space = self.codec.space
         self._state = np.zeros(self.fleet.state_len, np.float32)
         self._frame = None if self.fleet.frames is None else np.zeros_like(self.fleet.frames[0])
 
     def _observation(self):
         obs = self.config.obs
-        if obs == "state":
-            return self._state.copy()
         if obs == "image":
             return self._frame.copy()
-        return {"state": self._state.copy(), "image": self._frame.copy()}
+        state = self.view.build(self._state[None])[0] if self.view else self._state.copy()
+        return state if obs == "state" else {"state": state, "image": self._frame.copy()}
 
     def _keep(self, states):
         self._state[:] = states[0]

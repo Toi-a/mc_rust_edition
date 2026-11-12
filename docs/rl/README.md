@@ -49,7 +49,7 @@ with HorizonClient("/tmp/agent1.sock", frame_skip=1) as env:
 - `step(buttons, hotbar=0, yaw=nan, pitch=nan, frame_skip=0)`: the keys are held (sticky) until a
   later step changes them; `ATTACK` is one click; `yaw`/`pitch` are absolute degrees (NaN keeps).
 - `state` is the fair-play view (`env.state_fields` names its parts). `info` holds the reward
-  signals, the opponent's health among them; it is never part of `state`.
+  signals, the opponent's health among them; it is part of `state` only with `--rl-target-health`.
 - After a death the client clicks Respawn itself; `info["died"]` marks the step, and `reset()`
   returns once the player is back.
 
@@ -88,7 +88,8 @@ python/.venv/bin/horizon-rl --config python/examples/fleet.toml --policy idle --
 Options (or keys of the TOML file, `FleetConfig` in `python/horizon_rl/fleet.py`): `server`, `n`,
 `names` (a format of `{i}`, default `Agent_{i}`), `pairs` (2k and 2k+1 are each other's
 opponent) or `target` (a format of `{i}`), `obs` (`state`, `image` or `both`: every mode returns
-the state vector; `image` and `both` add frames), `image_size` (`[64, 64]`), `hud` (false), `frame_skip`,
+the state vector; `image` and `both` add frames), `image_size` (`[64, 64]`), `hud` (false), `target_health` (false: the
+server shows players' health, so the opponent's is observed), `frame_skip`,
 `render_distance` (2), `workers` (worker threads per client, 1), `clients_per_process` (1; see
 below), `stagger` (seconds between starts, 0.25), `hang_timeout` (5 s). It prints steps/s, the clients playing, late ticks, ended
 episodes and restarts every 10 s. Each client's files and log are under `--root` (default a new
@@ -157,9 +158,9 @@ stand-in server (`--server HOST:PORT` for a real one).
 - **`HorizonEnv`** (`gymnasium.Env`): one agent (`HorizonEnv(server=..., names="Agent",
   target="Rival")`). After `terminated` or `truncated`, `reset()` waits until the agent is alive
   in the world again (respawned, rejoined or restarted).
-- **Observation space**, by `obs`: `"state"`: `Box(-inf, inf, (L,), float32)`, the fair-play
-  vector (`env.state_fields`: name -> slice; `env.items`: the item registry its item indices
-  refer to); `"image"`: `Box(0, 255, (H, W), uint8)`; `"both"`: a `Dict` with `state` and `image`.
+- **Observation space**, by `obs`: `"state"`: `Box(-inf, inf, (L,), float32)`; `"image"`:
+  `Box(0, 255, (H, W), uint8)`; `"both"`: a `Dict` with `state` and `image`. The state is chosen
+  per run: [Observations](#observations).
 - **Action space**, built from parts so a first policy can start small and later ones get
   more (`horizon_rl.actions.ActionCodec`). By default
   `Dict(buttons=MultiBinary(9), hotbar=Discrete(10), look=...)`:
@@ -211,6 +212,70 @@ stand-in server (`--server HOST:PORT` for a real one).
 - **PettingZoo** (optional, `pip install pettingzoo`): `horizon_rl.parallel.HorizonParallelEnv`
   is a `ParallelEnv` over the same vector env, with the players' names as agents. An agent whose
   episode ended leaves `agents` and comes back by itself when its next one starts.
+
+### Observations
+
+Without `observation=`, the state is the game's whole vector, raw: 70 values,
+`env.state_fields` (name -> slice), `env.items` the item registry its item indices refer to.
+With it, the env returns the features you list, in that order (`env.observation_fields` says
+where each is):
+
+```python
+env = HorizonVecEnv(server=..., n=8, pairs=True,
+                    observation=("self_vel_local", "self_health", "self_attack_cooldown",
+                                 "target_present", "target_distance", "target_health"))
+env = HorizonVecEnv(server=..., n=8, pairs=True, observation="sword")   # a preset
+```
+
+**Features** (`horizon_rl.observations`). Every field of the game's state is one, under its
+own name:
+
+| Feature | Values | Divided by (with `normalize=True`, the default) |
+|---|---|---|
+| `self_pos` | 3 | – (world coordinates) |
+| `self_vel` | 3 | 0.5 blocks per tick |
+| `self_yaw`, `self_pitch` | 1, 1 | 180 (after folding into -180..180), 90 |
+| `self_health`, `self_absorption`, `self_food`, `self_armor` | 1 each | 20 |
+| `self_attack_cooldown` | 1 | – (0..1, 1 = charged) |
+| `self_selected` | 1 | 8 |
+| `self_hotbar_item`, `self_hotbar_count` | 9, 9 | – (item index + 1), 64 |
+| `self_offhand_item`, `self_offhand_count` | 1, 1 | –, 64 |
+| `self_armor_item` | 4 | – |
+| `self_on_ground`, `self_sprinting`, `self_sneaking`, `self_using_item`, `self_alive` | 1 each | – (0 or 1) |
+| `self_hurt_time` | 1 | 10 ticks |
+| `target_present` | 1 | – |
+| `target_rel_pos`, `target_rel_vel` | 3, 3 | 8 blocks, 0.5 blocks per tick |
+| `target_distance` | 1 | 8 blocks |
+| `target_yaw`, `target_pitch` | 1, 1 | 180, 90 |
+| `target_bearing` | 2 | 180, 90 (the turn that faces the opponent) |
+| `target_sneaking`, `target_sprinting`, `target_using_item`, `target_swinging`, `target_on_fire` | 1 each | – |
+| `target_hurt_time` | 1 | 10 |
+| `target_main_hand`, `target_off_hand`, `target_armor_item` | 1, 1, 4 | – |
+| `target_health`, `target_absorption` | 1, 1 | 20 (see below) |
+
+and derived ones:
+
+| Feature | Values | What |
+|---|---|---|
+| `self_vel_local` | 3 | own velocity as (forward, right, up) of the agent: forward is where it faces (its yaw; pitch not used). Divided by 0.5 |
+| `target_rel_vel_local`, `target_rel_pos_local` | 3, 3 | the opponent's relative velocity and position in that same frame |
+| `self_yaw_sincos` | 2 | sine and cosine of the yaw: no jump at +-180 |
+| `target_bearing_sincos` | 3 | sine and cosine of the bearing's yaw part, and its pitch part / 90 |
+
+- Nothing is clipped: a knockback can push a velocity past 1. Item indices and the world
+  position have no scale; leave them out or encode them yourself. `normalize=False` gives raw
+  values.
+- **`target_health` and `target_absorption`** are zero unless the run says the server shows its
+  players each other's health (`target_health=True` in the `FleetConfig`; the env sets it when an
+  observation asks for one of them). The fair-play rule and its switches:
+  [design.md](design.md#what-the-agent-observes-one-place-gamerlfair_playrs).
+- The `"sword"` preset (16 values) is the first training stage's view: `self_vel_local`,
+  `self_yaw`, `self_pitch`, `self_health`, `self_attack_cooldown`, `self_on_ground`,
+  `self_hurt_time`, `self_alive`, `target_present`, `target_rel_vel_local`, `target_distance`,
+  `target_health`. Add your own to `observations.PRESETS`, or pass a list.
+- The observation is fixed when the env is made (a policy's input size can't change under it). To
+  change it, make another env; several envs with different observations and actions can share
+  one running fleet (`HorizonVecEnv(fleet=env.fleet, observation=..., ...)`).
 
 ## Server
 

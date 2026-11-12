@@ -59,6 +59,9 @@ pub(in super::super) struct RlOptions {
     pub image: Option<[u32; 2]>,
     /// `--rl-hud`: those frames show the HUD (hidden by default, as F1).
     pub hud: bool,
+    /// `--rl-target-health`: the server shows its players each other's health, so the
+    /// observation has the target's health and absorption ([`fair_play`]).
+    pub target_health: bool,
     /// `--rl-client`: more clients in this process ([`shard`]).
     pub peers: Vec<Peer>,
 }
@@ -774,7 +777,7 @@ impl Game<'_> {
             .and_then(|id| self.mobs.iter().find(|m| m.id == id))
             .map(|m| {
                 let previous = s.target_seen;
-                TargetView::of(m, previous, |name| s.item_id(name))
+                TargetView::of(m, previous, |name| s.item_id(name), s.options.target_health)
             });
         s.target_seen = target.as_ref().map(|t| t.pos);
         let mut state = [0.0f32; STATE_LEN];

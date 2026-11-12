@@ -10,7 +10,8 @@ the action space are played; scripted fights through the Gymnasium actions land 
 duel reward is the damage dealt minus the damage taken; a death is `terminated`, then the agent is no
 transition until its new episode starts, while the others' rows stay valid; a kick is
 `truncated` with its reason; a staged action space (four keys, aim assist) keeps each agent
-facing its opponent. Then a one-agent `HorizonEnv` with the delta camera: turns add up,
+facing its opponent; a chosen observation (the `sword` preset) has the opponent's health and the
+velocity in the agent's own frame. Then a one-agent `HorizonEnv` with the delta camera: turns add up,
 a death terminates and `reset` brings the agent back alive.
 """
 import sys
@@ -44,7 +45,7 @@ def batch(actions):
 
 def vector(server, root):
     config = FleetConfig(server=server.address, n=N, pairs=True, obs="both", image_size=(64, 48),
-                         root=str(root / "fleet"))
+                         root=str(root / "fleet"), target_health=True)
     env = HorizonVecEnv(config, reward=duel)
     try:
         for name in env.names:
@@ -147,6 +148,26 @@ def vector(server, root):
         off = np.abs(obs["state"][:, env.state_fields["target_bearing"]][present])
         check(present.sum() >= 2 and off.max() < 1.0,
               f"aim assist keeps every agent facing its opponent ({present.sum()} agents, off by {off.max():.2f} degrees)")
+
+        # The first stage's observation: 16 chosen, normalised numbers, the opponent's health among them.
+        small = HorizonVecEnv(fleet=env.fleet, camera="aim", buttons=("forward",), hotbar=False, flat=True,
+                              observation="sword")
+        obs, _ = small.reset()
+        f, walked = small.observation_fields, []
+        for _ in range(30):
+            obs, _, _, _, infos = small.step(np.ones((N, 1), int))  # everyone walks forward
+            walked.append(obs["state"][:, f["self_vel_local"]])
+        view, walked = obs["state"], np.stack(walked)
+        check(view.shape == (N, 16) and small.observation_space.contains(obs), f"a chosen observation ({view.shape})")
+        seen = view[:, f["target_present"].start] > 0.5
+        check(seen.all() and np.allclose(view[:, f["target_health"].start], infos["target_health"] / 20, atol=1e-5)
+              and np.allclose(view[:, f["self_health"].start], infos["health"] / 20, atol=1e-5),
+              f"own and opponent health, as fractions ({np.round(view[:, f['target_health'].start], 2).tolist()})")
+        # (They walk into each other and stop there, so: the fastest tick of each.)
+        fastest = walked[np.abs(walked[:, :, 0]).argmax(axis=0), np.arange(N)]
+        check((fastest[:, 0] > 0.1).all() and (np.abs(fastest[:, 1]) < 0.5 * fastest[:, 0]).all(),
+              f"walking forward is forward in the agent's own frame ({np.round(fastest[:, :2], 2).tolist()})")
+        check(np.abs(view).max() <= 1.5, f"every feature is about within -1..1 (largest {np.abs(view).max():.2f})")
     finally:
         env.close()
 

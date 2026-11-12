@@ -11,6 +11,7 @@ from horizon_rl import proto  # noqa: E402
 from horizon_rl.actions import ActionCodec, from_bits  # noqa: E402
 from horizon_rl.env import HorizonEnv, HorizonVecEnv  # noqa: E402
 from horizon_rl.fleet import FleetConfig  # noqa: E402
+from horizon_rl.observations import ObservationView  # noqa: E402
 from horizon_rl.parallel import HorizonParallelEnv  # noqa: E402
 
 FIELDS = {"self_pos": slice(0, 3), "self_yaw": slice(3, 4), "self_pitch": slice(4, 5)}
@@ -202,7 +203,82 @@ class CodecTest(unittest.TestCase):
             self.assertTrue(codec.space.contains(codec.placeholder()))
 
 
+class ObservationTest(unittest.TestCase):
+    LAYOUT = {"self_vel": slice(0, 3), "self_yaw": slice(3, 4), "self_pitch": slice(4, 5), "self_health": slice(5, 6),
+              "self_attack_cooldown": slice(6, 7), "self_on_ground": slice(7, 8), "self_hurt_time": slice(8, 9),
+              "self_alive": slice(9, 10), "target_present": slice(10, 11), "target_rel_vel": slice(11, 14),
+              "target_distance": slice(14, 15), "target_health": slice(15, 16), "target_bearing": slice(16, 18),
+              "self_hotbar_item": slice(18, 20)}
+
+    def state(self, **values):
+        out = np.zeros((1, 20), np.float32)
+        for name, value in values.items():
+            out[0, self.LAYOUT[name]] = value
+        return out
+
+    def test_vectors_turn_into_the_agents_own_frame(self):
+        view = ObservationView(("self_vel_local",), normalize=False).bind(self.LAYOUT)
+        def check(vel, yaw, expected, what):
+            np.testing.assert_allclose(view.build(self.state(self_vel=vel, self_yaw=yaw))[0], expected,
+                                       atol=1e-6, err_msg=what)
+        # Yaw 0 faces +z (south), where the right hand is -x (west); yaw 90 faces -x.
+        check([0.0, 0.0, 0.2], 0.0, [0.2, 0.0, 0.0], "moving where it faces: forward")
+        check([-0.25, 0.0, 0.0], 0.0, [0.0, 0.25, 0.0], "west of a south-facing agent: right")
+        check([-0.3, 0.1, 0.0], 90.0, [0.3, 0.0, 0.1], "the same motion once it faces west: forward")
+        check([0.0, -0.4, -0.2], 0.0, [-0.2, 0.0, -0.4], "backwards and falling")
+
+    def test_features_are_scaled_to_about_one(self):
+        view = ObservationView(("self_health", "self_yaw", "self_pitch", "self_hurt_time", "target_distance",
+                                "self_vel_local", "self_hotbar_item")).bind(self.LAYOUT)
+        out = view.build(self.state(self_health=10.0, self_yaw=270.0, self_pitch=-45.0, self_hurt_time=5.0,
+                                    target_distance=4.0, self_vel=[0.0, 0.25, 0.0], self_hotbar_item=[812.0, 0.0]))[0]
+        self.assertEqual(out.tolist(), [0.5, -0.5, -0.5, 0.5, 0.5, 0.0, 0.0, 0.5, 812.0, 0.0])
+        self.assertEqual(view.fields["self_vel_local"], slice(5, 8))
+        raw = ObservationView(("self_health", "self_yaw"), normalize=False).bind(self.LAYOUT)
+        self.assertEqual(raw.build(self.state(self_health=10.0, self_yaw=270.0))[0].tolist(), [10.0, 270.0])
+
+    def test_an_angle_as_sine_and_cosine_has_no_jump(self):
+        view = ObservationView(("target_bearing_sincos",)).bind(self.LAYOUT)
+        behind = lambda yaw: view.build(self.state(target_present=1.0, target_bearing=[yaw, 45.0]))[0]  # noqa: E731
+        np.testing.assert_allclose(behind(179.0), behind(-179.0), atol=0.04)
+        np.testing.assert_allclose(behind(90.0), [1.0, 0.0, 0.5], atol=1e-6)
+        self.assertEqual(view.build(self.state(target_bearing=[90.0, 45.0]))[0].tolist(), [0.0, 0.0, 0.0],
+                         "no opponent: zeros")
+
+    def test_the_sword_preset_is_the_first_stages_view(self):
+        view = ObservationView("sword").bind(self.LAYOUT)
+        self.assertEqual((view.size, view.needs_target_health), (16, True))
+        out = view.build(self.state(target_present=1.0, target_health=15.0, self_alive=1.0))[0]
+        self.assertEqual((out[view.fields["target_health"]].tolist(), out[view.fields["self_alive"]].tolist()),
+                         ([0.75], [1.0]))
+
+    def test_a_feature_the_game_doesnt_have_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "self_mana"):
+            ObservationView(("self_mana",)).bind(self.LAYOUT)
+        with self.assertRaisesRegex(ValueError, "sword"):
+            ObservationView("axe")
+
+
 class VecEnvTest(unittest.TestCase):
+    def test_a_chosen_observation_replaces_the_state_vector(self):
+        fleet = with_opponent(FakeFleet(2, "both"))
+        env = HorizonVecEnv(fleet=fleet, observation=("target_present", "target_bearing", "self_pitch"))
+        obs, _ = env.reset()
+        self.assertEqual((env.single_observation_space["state"].shape, obs["state"].shape), ((4,), (2, 4)))
+        np.testing.assert_allclose(obs["state"], [[1.0, 40 / 180, -20 / 90, 0.0], [0.0, 40 / 180, -20 / 90, 0.0]])
+        obs = env.step(act(env, look=np.array([[0.0, 45.0], [0.0, 0.0]], np.float32)))[0]
+        self.assertEqual(obs["state"][0, env.observation_fields["self_pitch"]].tolist(), [0.5])
+        single = HorizonEnv(fleet=with_opponent(FakeFleet(1)), observation=("self_pitch", "target_present"))
+        self.assertEqual(single.reset()[0].tolist(), [0.0, 1.0])
+
+    def test_the_opponents_health_needs_a_server_that_shows_it(self):
+        fleet = with_opponent(FakeFleet(1))
+        fleet.state_fields["target_health"] = slice(7, 8)
+        with self.assertRaisesRegex(ValueError, "target_health=True"):
+            HorizonVecEnv(fleet=fleet, observation=("target_health",))
+        fleet.config.target_health = True
+        self.assertEqual(HorizonVecEnv(fleet=fleet, observation=("target_health",)).single_observation_space.shape, (1,))
+
     def test_aim_assist_reads_the_bearing_of_the_observation(self):
         fleet = with_opponent(FakeFleet(2))
         env = HorizonVecEnv(fleet=fleet, camera="aim", buttons=("forward", "attack"), hotbar=False, flat=True)
