@@ -9398,7 +9398,7 @@ impl Game<'_> {
         if self.screenshot_sequence.is_some() {
             return self.render_sequence_frame();
         }
-        self.render_frame()
+        self.rl_render_frame()
     }
     fn render_frame(&mut self) -> Result<bool> {
         let prepare = spans::guard("prepare");

@@ -107,7 +107,7 @@ pub(super) struct Adapted {
 /// offscreen). An adapter the surface offers no format on fails before its device opens.
 pub(super) async fn open_adapter(
     name: &str,
-    window: &Arc<Window>,
+    window: Option<&Arc<Window>>,
     surface: Option<&wgpu::Surface<'static>>,
     adapter: &wgpu::Adapter,
     layers: u32,
@@ -201,7 +201,7 @@ pub(super) async fn open_adapter(
                 &device,
                 &device_lost,
                 caps,
-                window.inner_size(),
+                window.map_or(Default::default(), |w| w.inner_size()),
                 None,
                 true,
             )

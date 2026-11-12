@@ -1,8 +1,8 @@
 # Horizon RL: design
 
-Status: **reviewed** (2026-11-10). M1 (one client from Python) and M2 (a supervised fleet,
-[measured](#m2-measurements)) are built; images (M3), the Gymnasium env (M4) and removal (M5) are
-next.
+Status: **reviewed** (2026-11-10). M1 (one client from Python), M2 (a supervised fleet,
+[measured](#m2-measurements)) and M3 (grayscale image observations, [measured](#m3-measurements))
+are built; the Gymnasium env (M4) and removal (M5) are next.
 
 Goal: many headless 26.3 clients, each an offline-mode player on a remote (Paper) server, driven
 from Python through a Gymnasium env for PvP self-play. Per-instance CPU and RAM are the main costs.
@@ -156,18 +156,34 @@ Item indices come from the 26.3 item registry order, which the client also retur
 
 ### Images
 
-- An offscreen render of the player's normal view at W×H (64–128). The HUD is optional, and nothing
-  extra is drawn: no hitboxes, outlines or nametags through walls (vanilla hides nametags behind
-  walls anyway, but `--no-nametags` turns them off entirely).
-- A small GPU pass converts the picture to luma `u8` (it reads the tonemapped LDR picture, per
-  [hdr-passes.md](../hdr-passes.md)). We copy it into a mapped staging buffer, then memcpy it into
-  the shm frame slot: no PNG and no CPU colour conversion.
-- Rendering has to work **without a display**. Today `--offscreen` needs winit. New: `--headless
-  --render`, where the headless loop also builds a `Renderer` with no surface (wgpu allows that,
-  `open_device_with(window = None, offscreen = true)`). We render once per observation, not per
-  tick: with `frame_skip` 4 that is 5 frames/s.
-- Rendering costs: smallest render distance, no clouds or particles in the picture by default
-  (configurable), shadows and other post effects off.
+Built in M3 (`game/rl/image.rs`, `gfx/luma.rs`): `--rl-image WxH` (W a multiple of 4, 8..512).
+
+- **No display**: `--headless --render` (which `--rl-image` turns on) builds the game's normal
+  `Renderer` with no window: `Renderer::new` takes `Option<Arc<Window>>` and, without one, opens
+  the device with no surface and draws into its offscreen target at W x H. The headless loop
+  stays as it was.
+- **Once per observation**: the observation of a step is written after the frame drawn right
+  after its last tick, so frame and state show the same tick (`Game::rl_render_frame`, which
+  `Game::render` calls). Between observations the headless game draws nothing: with frame skip 4,
+  one frame per 4 ticks.
+- **Luma on the GPU**: the offscreen picture (8-bit, after the tone curve and the HUD, as the
+  display would show it) is copied into a buffer, a compute pass packs Rec. 601 luma bytes, and
+  they come back through a mapped staging buffer straight into the shm frame slot. No PNG, no CPU
+  colour work. HDR stays off (docs/hdr-passes.md rule 8: a capture takes the SDR picture). The
+  read waits for the GPU; at 64x64 the whole frame (draw + read) costs ~1–3 ms.
+- **Nothing extra drawn**: the HUD is hidden unless `--rl-hud` (vanilla's F1, which also hides
+  the hand and all name tags, so no separate `--no-nametags` is needed).
+- **Cheap settings**: the fleet writes `options.txt` (`RENDER_OPTIONS`): no clouds, minimal
+  particles, no smooth lighting, biome blend, mipmaps or entity shadows; render distance 2.
+- **State-only pays nothing**: without `--rl-image` no renderer or GPU device is opened.
+- `info` gains `frame_fresh` (this observation's frame was drawn for it; 0 keeps the last one,
+  e.g. if the GPU failed) and `frame_ms`. Python: `Session.frame()` / `Fleet.frames` (n, H, W).
+- **BAR1**: wgpu's allocator puts mappable upload buffers in the device-local, host-visible
+  heap. On NVIDIA without Resizable BAR that is the 256 MB BAR1 window, shared by every process:
+  ~20 MB per client, so from ~12 image clients on new ones fail to open the GPU ("Parent device
+  is lost", `NVRM: can't alloc VA space` in the kernel log). `HORIZON_NO_BAR_UPLOADS=1` (in our
+  vendored `third_party/wgpu-hal`, set by the fleet) keeps them in system memory: 0.75 MB of BAR1
+  per client, and no measurable cost (N = 8: 9.9 vs 9.4 % CPU, 3.0 vs 2.9 ms per frame).
 
 ## Rewards, episodes and `info`
 
@@ -345,3 +361,34 @@ What this says:
 - The local stand-in server spends ~5 cores on a **flat** world as soon as players are on it, even
   idle (a normal world: ~6 %). That is a Horizon dedicated-server issue, not the clients'; the e2e
   tests still use flat, the benchmark a normal world. On Paper this doesn't apply.
+
+## M3 measurements
+
+Measured 2026-11-12 on the same desktop (RTX 2070 SUPER 8 GB, NVIDIA 620.70), `--profile fast`,
+`python/bench/fleet.py --obs image --image 64x64` (same fights as M2, frame skip 1: a frame
+every tick). GPU memory is `nvidia-smi`'s total, divided by N.
+
+| N | obs | client CPU % | RSS MB | PSS MB | GPU MB | frame ms | fresh frames | steps/s | late ticks |
+|---|---|---|---|---|---|---|---|---|---|
+| 8 | state | 3.36 | 395 | 348 | 0 | – | – | 20.01 | 0 |
+| 8 | image 64x64 | 9.9 | 544 | 379 | 182 | 3.0 | 100 % | 19.99 | 0.2 / 1000 |
+| 32 | image 64x64 | 3.44 | 546 | 374 | 181 | 1.5 | 100 % | 20.00 | 0 |
+
+N = 40 with images wasn't completed: the session's memory guard stopped the run (40 × ~550 MB RSS
+on a 23 GB desktop).
+
+What this says:
+
+- **20 Hz holds with a frame every tick at N = 32**, every frame fresh, no late ticks.
+- **Memory per image client**: +150 MB RSS but only +30 MB PSS over state-only (the NVIDIA
+  driver's libraries are shared), plus **~180 MB of GPU memory**. The design expected +200 MB of
+  RAM; it is the GPU memory that costs. On this 8 GB card that caps N at ~42 with images; by
+  RAM (PSS), ~50.
+- **CPU % depends on the clock.** With the `powersave` governor and a lightly loaded machine the
+  cores run slow, so the same work shows as more % of a core: state-only at N = 8 was 1.07 % in
+  the M2 table (measured while a stray server kept the cores busy) and 3.36 % here, with the
+  machine otherwise idle. At N = 32 the fleet keeps the clocks up itself. Compare rows only within
+  one run; for absolute numbers use the `performance` governor (or count cycles).
+- **The shard model (B)** would share one GPU device (driver context, block textures, pipelines)
+  and the driver's per-process memory among K clients: the 180 MB of GPU memory and ~30 MB PSS
+  per client are what it could save. Not built: asked first (open question).

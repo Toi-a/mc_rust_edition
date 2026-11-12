@@ -300,6 +300,10 @@ pub const INFO: &[Field] = &[
     f("disconnects_total", 1),
     // Joins the client started on its own after losing the connection.
     f("reconnects_total", 1),
+    // Image observations: the frame was drawn for this observation (0: the last one is kept),
+    // and drawing plus reading it back took this long.
+    f("frame_fresh", 1),
+    f("frame_ms", 1),
 ];
 
 /// The number of `f32`s in `fields`.

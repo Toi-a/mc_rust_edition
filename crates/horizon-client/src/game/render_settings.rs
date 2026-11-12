@@ -25,7 +25,7 @@ impl<K: PartialEq> FrameAttempt<K> {
 impl Game<'_> {
     pub(super) fn renderer_for(
         &self,
-        window: Arc<Window>,
+        window: impl Into<Option<Arc<Window>>>,
         pack: &PackResources,
         gui: &UiResources,
     ) -> Result<Renderer> {

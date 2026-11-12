@@ -207,7 +207,7 @@ impl FrameGen {
         queue: &wgpu::Queue,
         surface: Option<&Arc<wgpu::Surface<'static>>>,
         offscreen: Option<&wgpu::Texture>,
-        window: &Arc<winit::window::Window>,
+        window: Option<&Arc<winit::window::Window>>,
         config: &wgpu::SurfaceConfiguration,
     ) -> Option<(wgpu::Texture, wgpu::Texture)> {
         let Some(surface) = surface else {
@@ -222,6 +222,7 @@ impl FrameGen {
             let generated = self.offscreen_generated.clone().expect("made above");
             return Some((real, generated));
         };
+        let window = window?;
         if self.presenter.as_ref().is_some_and(|p| p.config != *config) {
             self.presenter = None;
         }

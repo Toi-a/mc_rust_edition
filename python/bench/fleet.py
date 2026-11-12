@@ -66,11 +66,23 @@ def memory_mb(pid):
     return rss / 1024, pss / 1024
 
 
+def gpu_memory_mb():
+    """The GPU's memory in use (all processes), from nvidia-smi; None without it."""
+    import subprocess
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return float(out.split()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
 def mean(xs):
     return sum(xs) / len(xs) if xs else float("nan")
 
 
-def run(n, seconds, settle, workers, render_distance, infer_ms=0.0):
+def run(n, seconds, settle, workers, render_distance, infer_ms=0.0, obs="state", image=(64, 64),
+        frame_skip=1):
     root = Path(tempfile.mkdtemp(prefix=f"horizon-rl-bench-{n}-"))
     # A normal world: the stand-in server spends ~5 cores on a flat one with players (a Horizon
     # dedicated-server issue, not the clients'; docs/rl/design.md#m2-measurements).
@@ -78,8 +90,10 @@ def run(n, seconds, settle, workers, render_distance, infer_ms=0.0):
                                            "level-type": "minecraft:normal"})
     server.command("gamerule spawn_radius 0")
     config = FleetConfig(server=server.address, n=n, pairs=True, workers=workers,
-                         render_distance=render_distance, root=str(root / "fleet"))
+                         render_distance=render_distance, root=str(root / "fleet"), obs=obs,
+                         image_size=image, frame_skip=frame_skip)
     fleet = Fleet(config)
+    gpu0 = gpu_memory_mb()
     try:
         t_start = time.monotonic()
         fleet.start(timeout=120 + n)
@@ -112,6 +126,10 @@ def run(n, seconds, settle, workers, render_distance, infer_ms=0.0):
                         stats["over_steps"] += info["tick_overrun_ms"] > 0
                         stats["hits"] += info["hit_landed"]
                         stats["deaths"] += info["died"]
+                        if "frame_fresh" in info and obs != "state":
+                            stats["frames"] += 1
+                            stats["fresh"] += info["frame_fresh"]
+                            stats["frame_ms"] += info["frame_ms"]
                     if stats is not None:
                         stats["truncated"] += bool(trunc[i])
             return steps
@@ -121,7 +139,7 @@ def run(n, seconds, settle, workers, render_distance, infer_ms=0.0):
         cpu0 = [cpu_seconds(p) for p in pids]
         server_cpu0, py_cpu0 = cpu_seconds(server.proc.pid), time.process_time()
         stats = dict(slot_steps=0, ticks=0, late=0, overrun_ms=0.0, over_steps=0, hits=0, deaths=0,
-                     truncated=0)
+                     truncated=0, frames=0, fresh=0, frame_ms=0.0)
         rss, pss = [], []
         t0 = time.monotonic()
         steps = 0
@@ -130,12 +148,16 @@ def run(n, seconds, settle, workers, render_distance, infer_ms=0.0):
             rss += [r for r in map(rss_mb, pids) if r is not None]
         dt = time.monotonic() - t0
         pss = [m[1] for m in map(memory_mb, pids) if m]
+        gpu1 = gpu_memory_mb()
         cpu = [(c1 - c0) / dt * 100 for c0, c1 in zip(cpu0, (cpu_seconds(p) for p in pids))
                if c0 is not None and c1 is not None]
         restarts = sum(s.restarts for s in fleet.slots)
         ss = max(stats["slot_steps"], 1)
         return {
             "n": n,
+            "obs": obs,
+            "image": f"{image[0]}x{image[1]}" if obs != "state" else None,
+            "frame_skip": frame_skip,
             "infer_ms": infer_ms,
             "started_s": round(started_in, 1),
             "client_cpu_pct_mean": round(mean(cpu), 2),
@@ -144,6 +166,7 @@ def run(n, seconds, settle, workers, render_distance, infer_ms=0.0):
             "client_rss_mb_mean": round(mean(rss), 1),
             "client_rss_mb_max": round(max(rss), 1) if rss else None,
             "client_pss_mb_mean": round(mean(pss), 1),
+            "gpu_mb_per_client": round((gpu1 - gpu0) / n, 1) if gpu0 is not None and gpu1 is not None else None,
             "server_cpu_pct": round((cpu_seconds(server.proc.pid) - server_cpu0) / dt * 100, 1),
             "python_cpu_pct": round((time.process_time() - py_cpu0) / dt * 100, 1),
             "vector_steps_per_s": round(steps / dt, 2),
@@ -151,6 +174,8 @@ def run(n, seconds, settle, workers, render_distance, infer_ms=0.0):
             "late_ticks_per_1000_steps": round(1000 * stats["late"] / ss, 1),
             "overrun_steps_per_1000": round(1000 * stats["over_steps"] / ss, 1),
             "overrun_ms_per_1000_steps": round(1000 * stats["overrun_ms"] / ss, 1),
+            "frame_ms_mean": round(stats["frame_ms"] / stats["frames"], 2) if stats["frames"] else None,
+            "fresh_frames_pct": round(100 * stats["fresh"] / stats["frames"], 1) if stats["frames"] else None,
             "hits": stats["hits"],
             "deaths": stats["deaths"],
             "truncated": stats["truncated"],
@@ -171,10 +196,15 @@ def main():
     ap.add_argument("--render-distance", type=int, default=2)
     ap.add_argument("--infer-ms", type=float, default=0.0,
                     help="sleep this long per step before sending, as a policy's inference would")
+    ap.add_argument("--obs", default="state", choices=["state", "image", "both"])
+    ap.add_argument("--image", default="64x64", help="WxH of the frames with --obs image|both")
+    ap.add_argument("--frame-skip", type=int, default=1)
     ap.add_argument("--out")
     args = ap.parse_args()
     for n in (int(x) for x in args.ns.split(",")):
-        result = run(n, args.seconds, args.settle, args.workers, args.render_distance, args.infer_ms)
+        image = tuple(int(v) for v in args.image.lower().split("x"))
+        result = run(n, args.seconds, args.settle, args.workers, args.render_distance, args.infer_ms,
+                     args.obs, image, args.frame_skip)
         line = json.dumps(result)
         print(line, flush=True)
         if args.out:

@@ -4,7 +4,9 @@ server = "192.168.1.50:25565"   # an offline-mode 26.3 server (Paper: connection
 n = 8
 names = "Agent_{i}"
 pairs = true                    # 2k and 2k+1 fight each other (or: target = "Rival_{i}")
-obs = "state"
+obs = "state"                   # or "image" / "both": grayscale frames of the view too
+image_size = [64, 64]           # width (a multiple of 4), height
+hud = false                     # draw the HUD in the frames
 frame_skip = 1
 render_distance = 2
 workers = 1                     # worker threads per client

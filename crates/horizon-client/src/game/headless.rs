@@ -56,6 +56,8 @@ impl Game<'_> {
             exit: Cell::new(false),
             flow: Cell::new(ControlFlow::Poll),
         };
+        // `--render`: a renderer without a window (RL image observations).
+        self.headless_renderer();
         self.previous = Instant::now();
         while !ctl.exit.get() {
             // An RL client lines its ticks up after its steps (game/rl): the wait moves the

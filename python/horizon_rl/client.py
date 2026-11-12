@@ -54,6 +54,12 @@ class Session:
         self._beat = np.frombuffer(self._mm, np.uint64, 1, welcome.get("beat_off", proto.BEAT_OFF))
         self._state = np.frombuffer(self._mm, np.float32, self.state_len, welcome["state_off"])
         self._info = np.frombuffer(self._mm, np.float32, info_len, welcome["info_off"])
+        # Image observations (`--rl-image WxH`): the frame slot as an (h, w) uint8 view.
+        self.frame_shape = (welcome.get("frame_h", 0), welcome.get("frame_w", 0))
+        self._frame = None
+        if self.frame_shape[0] * self.frame_shape[1] > 0:
+            self._frame = np.frombuffer(self._mm, np.uint8, self.frame_shape[0] * self.frame_shape[1],
+                                        welcome["frame_off"]).reshape(self.frame_shape)
 
     def beat(self):
         """The game's heartbeat: it grows every frame while the game runs."""
@@ -66,11 +72,15 @@ class Session:
                 for n, s in self.info_fields.items()}
         return state, info
 
+    def frame(self):
+        """The last observation's grayscale frame, (h, w) uint8 (a copy); None without images."""
+        return None if self._frame is None else self._frame.copy()
+
     def field(self, state, name):
         return state[self.state_fields[name]]
 
     def close(self):
-        self._beat = self._state = self._info = None
+        self._beat = self._state = self._info = self._frame = None
         try:
             self._mm.close()
         except (BufferError, AttributeError):

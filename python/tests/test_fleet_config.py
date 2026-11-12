@@ -21,13 +21,27 @@ class FleetConfigTest(unittest.TestCase):
     def test_a_toml_file_with_overrides_on_top(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "fleet.toml"
-            path.write_text('server = "10.0.0.2:25565"\nn = 6\nextra_args = ["--foo"]\n')
+            path.write_text('server = "10.0.0.2:25565"\nn = 6\nextra_args = ["--foo"]\n'
+                            'image_size = [96, 64]\n')
             c = FleetConfig.load(path, n=3, render_distance=None)
-            self.assertEqual((c.server, c.n, c.render_distance, c.extra_args),
-                             ("10.0.0.2:25565", 3, 2, ("--foo",)))
+            self.assertEqual((c.server, c.n, c.render_distance, c.extra_args, c.image_size),
+                             ("10.0.0.2:25565", 3, 2, ("--foo",), (96, 64)))
             path.write_text('server = "h:1"\nnn = 6\n')
             with self.assertRaisesRegex(ValueError, "nn"):
                 FleetConfig.load(path)
+
+    def test_image_modes_check_the_frame_size(self):
+        self.assertFalse(FleetConfig(server="h:1").images)
+        self.assertTrue(FleetConfig(server="h:1", obs="both").images)
+        from horizon_rl.fleet import Fleet
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(ValueError, "multiple of 4"):
+                Fleet(FleetConfig(server="h:1", obs="image", image_size=(66, 64), root=d))
+            with self.assertRaisesRegex(ValueError, "obs"):
+                Fleet(FleetConfig(server="h:1", obs="pixels", root=d))
+            fleet = Fleet(FleetConfig(server="h:1", n=3, obs="image", image_size=(96, 64), root=d))
+            self.assertEqual(fleet.frames.shape, (3, 64, 96))
+            fleet.close()
 
     def test_the_example_config_loads(self):
         example = Path(__file__).resolve().parents[1] / "examples" / "fleet.toml"

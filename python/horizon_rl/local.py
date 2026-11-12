@@ -100,16 +100,35 @@ class LocalServer:
                 self.proc.kill()
 
 
+# What a client that draws frames for images starts with (its game folder's options.txt, when it
+# has none): no clouds, minimal particles, no smooth lighting, biome blend, mipmaps, shadows or
+# fade-in. These cost drawing time and add nothing a policy needs; the view is otherwise vanilla's.
+RENDER_OPTIONS = {
+    "renderClouds": '"false"',
+    "particles": "2",
+    "ao": "false",
+    "biomeBlendRadius": "0",
+    "mipmapLevels": "0",
+    "entityShadows": "false",
+    "chunkSectionFadeInTime": "0.0",
+    "enableVsync": "false",
+    "weatherRadius": "3",
+}
+
+
 class ClientProcess:
     """One `horizon-client --headless` joined to `server` as `name`, with an RL socket unless
     `rl=False`."""
 
     def __init__(self, server_address, name, root, rl=True, render_distance=2, extra=(),
-                 binary=None, resources=None, env=None):
+                 binary=None, resources=None, env=None, render_options=None):
         self.name = name
         self.root = Path(root) / name
         self.game_dir = self.root / "game"
         self.game_dir.mkdir(parents=True, exist_ok=True)
+        options = self.game_dir / "options.txt"
+        if render_options and not options.exists():
+            options.write_text("".join(f"{k}:{v}\n" for k, v in render_options.items()))
         self.socket = self.root / "rl.sock" if rl else None
         shm_dir = Path("/dev/shm") if Path("/dev/shm").is_dir() else self.root
         self.shm = shm_dir / f"horizon-rl-{os.getpid()}-{name}" if rl else None

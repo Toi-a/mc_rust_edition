@@ -206,6 +206,7 @@ mod custom_sky;
 mod displace;
 pub mod lightning;
 mod lod;
+pub mod luma;
 mod native_material;
 mod native_pack;
 mod native_post;
@@ -905,8 +906,7 @@ fn mark_fades(
 }
 /// Line segments the hit outline can hold.
 const MAX_OUTLINE_EDGES: u64 = 256;
-/// Staging buffer size for section meshes: a frame of uploads while
-/// exploring fits in a few.
+/// Staging buffer size for section meshes: a frame of uploads while exploring fits in a few.
 const SECTION_UPLOAD_CHUNK: u64 = 4 << 20;
 /// Section copies are submitted early past this many staged bytes, which
 /// bounds the staging memory frames that are not drawn can hold.
@@ -1198,7 +1198,7 @@ pub struct Renderer {
     reading: output::DisplayReading,
     /// The watch was just made: the settings' Auto values take what it reported.
     display_fresh: bool,
-    window: Arc<Window>,
+    window: Option<Arc<Window>>,
     pub device: wgpu::Device,
     /// The shader modules, layouts and pipelines kept for the next renderer on
     /// this device ([`reuse`]).
@@ -2335,7 +2335,7 @@ fn horizon_tone_curve(layered: bool, world: bool, pack_tonemap: bool) -> bool {
 /// Offscreen rendering needs no surface, so it can use a GPU the window's
 /// display cannot present from (a headless compositor).
 async fn open_device(
-    window: &Arc<Window>,
+    window: Option<&Arc<Window>>,
     offscreen: bool,
     api: GraphicsApi,
     layers: u32,
@@ -2399,7 +2399,7 @@ fn device_search(
 /// `open_device` on `order`'s backends in turn, taking an adapter of the CPU type
 /// (software rendering) only when `allow_cpu`.
 async fn open_device_with(
-    window: &Arc<Window>,
+    window: Option<&Arc<Window>>,
     offscreen: bool,
     order: &[wgpu::Backends],
     layers: u32,
@@ -2432,7 +2432,7 @@ enum NoDevice {
 /// all they get). Returns why the backend gave no device.
 async fn open_with_retry(
     backends: wgpu::Backends,
-    window: &Arc<Window>,
+    window: Option<&Arc<Window>>,
     offscreen: bool,
     layers: u32,
     allow_cpu: bool,
@@ -2490,7 +2490,7 @@ pub(crate) fn is_broken_haswell_vulkan(info: &wgpu::AdapterInfo) -> bool {
 /// software adapter is taken only when `allow_cpu`.
 async fn open_backend(
     backends: wgpu::Backends,
-    window: &Arc<Window>,
+    window: Option<&Arc<Window>>,
     offscreen: bool,
     allow_nonconformant: bool,
     layers: u32,
@@ -2500,7 +2500,7 @@ async fn open_backend(
     let open = |dx12_compiler| {
         wgpu::Instance::new(instance_descriptor(
             backends,
-            Some(window),
+            window,
             allow_nonconformant,
             dx12_compiler,
         ))
@@ -2599,18 +2599,14 @@ async fn open_backend(
 /// request's.
 async fn surface_and_adapter(
     instance: &wgpu::Instance,
-    window: &Arc<Window>,
+    window: Option<&Arc<Window>>,
     offscreen: bool,
 ) -> std::result::Result<(Option<wgpu::Surface<'static>>, wgpu::Adapter), NoDevice> {
-    let surface = if offscreen {
-        None
-    } else {
-        Some(
-            instance
-                .create_surface(window.clone())
-                .map_err(|e| NoDevice::Failed(e.to_string()))?,
-        )
-    };
+    let surface = window
+        .filter(|_| !offscreen)
+        .map(|window| instance.create_surface(window.clone()))
+        .transpose()
+        .map_err(|e| NoDevice::Failed(e.to_string()))?;
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -2628,7 +2624,7 @@ async fn surface_and_adapter(
 /// offers another GPU: the FXC instance stays.
 async fn open_dxc(
     fxc: &wgpu::AdapterInfo,
-    window: &Arc<Window>,
+    window: Option<&Arc<Window>>,
     offscreen: bool,
     open: impl FnOnce(wgpu::Dx12Compiler) -> wgpu::Instance,
 ) -> Option<(
@@ -2847,7 +2843,7 @@ impl Renderer {
 }
 impl Renderer {
     pub async fn new(
-        window: Arc<Window>,
+        window: impl Into<Option<Arc<Window>>>,
         offscreen: bool,
         sprite_pixels: &[u8],
         sprite_size: u32,
@@ -2871,6 +2867,7 @@ impl Renderer {
         request: output::FrameRequest,
         display: output::DisplayReading,
     ) -> Result<Self> {
+        let window = window.into();
         let Opened {
             instance,
             surface,
@@ -2887,9 +2884,7 @@ impl Renderer {
                 describe_adapter(&renderer.adapter);
                 check_layers(&renderer.adapter, layers)?;
                 Opened {
-                    surface: if offscreen {
-                        None
-                    } else {
+                    surface: if let Some(window) = window.as_ref().filter(|_| !offscreen) {
                         let spare = renderer
                             .spare_surface
                             .lock()
@@ -2899,6 +2894,8 @@ impl Renderer {
                             Some(surface) => surface,
                             None => renderer.instance.create_surface(window.clone())?,
                         })
+                    } else {
+                        None
                     },
                     instance: renderer.instance.clone(),
                     adapter: renderer.adapter.clone(),
@@ -2910,7 +2907,7 @@ impl Renderer {
             }
             None => {
                 let _step = crate::spans::startup::step("renderer.open_device");
-                open_device(&window, offscreen, api, layers).await?
+                open_device(window.as_ref(), offscreen, api, layers).await?
             }
         };
         // Computed once: the sprite arrays, the shaders' constants and the
@@ -2921,7 +2918,9 @@ impl Renderer {
         }
         let info = adapter.get_info();
         crate::graphics::suggest_reduced_far_detail(crate::graphics::lod_capped(&info));
-        let size = window.inner_size();
+        let size = window
+            .as_ref()
+            .map_or(Default::default(), |w| w.inner_size());
         let max_side = device.limits().max_texture_dimension_2d;
         let configured = match (&surface, configured) {
             (Some(_), Some(configured)) => Some(configured),
@@ -5625,7 +5624,7 @@ impl Renderer {
         self.surface = None;
         let surface = match spare {
             Some(surface) => surface,
-            None => self.instance.create_surface(self.window.clone())?,
+            None => (self.instance).create_surface(self.window.clone().ok_or("no window")?)?,
         };
         let configured = Self::configure(
             &self.device,
@@ -8257,7 +8256,7 @@ impl Renderer {
                     &self.queue,
                     self.surface.as_ref(),
                     self.offscreen.as_ref(),
-                    &self.window,
+                    self.window.as_ref(),
                     &self.config,
                 )
             })
@@ -12125,7 +12124,7 @@ impl Renderer {
             // callbacks, one per refresh. Only VSync (Fifo) waits for the
             // display: with it off, vanilla's window draws uncapped.
             if self.config.present_mode == wgpu::PresentMode::Fifo {
-                self.window.pre_present_notify();
+                self.window.iter().for_each(|w| w.pre_present_notify());
             }
             if first_frame {
                 startup_step(format_args!("presenting the first frame"));
@@ -15319,13 +15318,13 @@ const DISPLAY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 impl DisplayWatch {
     /// Starts watching, with what the system reports now.
     fn new(
-        window: &Window,
+        window: Option<&Window>,
         surface: Option<&wgpu::Surface>,
         adapter: &wgpu::Adapter,
     ) -> (Self, DisplayReading) {
         #[cfg(target_os = "linux")]
         if surface.is_some()
-            && let Some((wayland, now)) = horizon_hdr::wayland::Watch::new(window)
+            && let Some((wayland, now)) = window.and_then(horizon_hdr::wayland::Watch::new)
         {
             let watch = Self {
                 wayland: Some(wayland),

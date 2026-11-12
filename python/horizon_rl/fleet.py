@@ -17,6 +17,7 @@
 import dataclasses
 import json
 import math
+import os
 import selectors
 import socket
 import tempfile
@@ -27,9 +28,11 @@ import numpy as np
 
 from . import proto
 from .client import Framer, Session
-from .local import ClientProcess, remove
+from .local import RENDER_OPTIONS, ClientProcess, remove
 
-OBS_MODES = ("state",)  # "image" and "both" come with M3.
+# "state": the fair-play state vector; "image": grayscale frames of the view; "both". Every mode
+# also returns the state vector (it costs nothing); "image" and "both" draw frames.
+OBS_MODES = ("state", "image", "both")
 
 # Backoff of a slot's restarts, in seconds; a slot healthy for RESTART_STABLE starts over.
 RESTART_DELAYS = (1, 2, 4, 8, 16, 30)
@@ -46,6 +49,9 @@ class FleetConfig:
     target: str = ""
     pairs: bool = False
     obs: str = "state"
+    # Images: (width, height), the width a multiple of 4; `hud` draws the HUD in them.
+    image_size: tuple = (64, 64)
+    hud: bool = False
     frame_skip: int = 1
     render_distance: int = 2
     # Worker threads per client (chunk streaming jobs). Headless needs few.
@@ -73,9 +79,14 @@ class FleetConfig:
         unknown = set(data) - known
         if unknown:
             raise ValueError(f"unknown fleet settings: {', '.join(sorted(unknown))}")
-        if "extra_args" in data:
-            data["extra_args"] = tuple(data["extra_args"])
+        for key in ("extra_args", "image_size"):
+            if key in data:
+                data[key] = tuple(data[key])
         return cls(**data)
+
+    @property
+    def images(self):
+        return self.obs in ("image", "both")
 
     def name(self, i):
         return self.names.format(i=i)
@@ -108,6 +119,7 @@ class Slot:
         self.reason = None  # why the episode ended, for the step that reports it
         self.start_reason = None  # a fault between episodes, for the next one's first info
         self.last = None  # the last (state, info)
+        self.last_frame = 0  # and its frame, with images
         self.episode_start = False
         self.need_reset = True
 
@@ -117,7 +129,10 @@ class Fleet:
 
     def __init__(self, config):
         if config.obs not in OBS_MODES:
-            raise ValueError(f"obs {config.obs!r}: only {OBS_MODES} so far")
+            raise ValueError(f"obs {config.obs!r}: one of {OBS_MODES}")
+        w, h = config.image_size
+        if config.images and (w % 4 or not 8 <= w <= 512 or not 8 <= h <= 512):
+            raise ValueError(f"image_size {config.image_size}: sides 8..512, the width a multiple of 4")
         self.config = config
         self.root = Path(config.root or tempfile.mkdtemp(prefix="horizon-rl-fleet-"))
         self.root.mkdir(parents=True, exist_ok=True)
@@ -128,6 +143,9 @@ class Fleet:
         self.state_fields = None
         self.info_fields = None
         self.items = None
+        # The last frames, (n, h, w) uint8, with images (zeros for a slot without one).
+        self.frames = (np.zeros((config.n, config.image_size[1], config.image_size[0]), np.uint8)
+                       if config.images else None)
 
     # -- processes ---------------------------------------------------------------------------
 
@@ -138,9 +156,21 @@ class Fleet:
         if target:
             extra += ["--rl-target", target]
         env = {"HORIZON_JOB_THREADS": str(c.workers), "HORIZON_WORKER_THREADS": str(c.workers)}
+        render_options = None
+        if c.images:
+            extra += ["--rl-image", f"{c.image_size[0]}x{c.image_size[1]}"]
+            if c.hud:
+                extra.append("--rl-hud")
+            # One frame per observation, read back at once: no thread to submit it on.
+            env["HORIZON_SUBMIT_THREAD"] = "0"
+            # Uploads in system memory, not the GPU's small BAR1 window, which every process
+            # shares: N clients mapping blocks there run it out (third_party/wgpu-hal).
+            env["HORIZON_NO_BAR_UPLOADS"] = os.environ.get("HORIZON_NO_BAR_UPLOADS", "1")
+            render_options = RENDER_OPTIONS
         slot.proc = ClientProcess(c.server, slot.name, self.root, render_distance=c.render_distance,
                                   extra=extra, binary=c.binary or None,
-                                  resources=c.resources or None, env=env)
+                                  resources=c.resources or None, env=env,
+                                  render_options=render_options)
         slot.state = "starting"
         slot.until = now + c.start_timeout
 
@@ -255,7 +285,7 @@ class Fleet:
         elif kind == proto.READY:
             seq, _tick = proto.read_ready(payload)
             if slot.state == "resetting" and seq == 0:
-                slot.last = slot.session.observation()
+                self._observe(slot)
                 slot.state = "ready"
                 slot.need_reset = False
                 slot.episode_start = True
@@ -263,10 +293,16 @@ class Fleet:
                 if slot.healthy_since is None:
                     slot.healthy_since = now
             elif slot.state == "stepping" and seq == slot.seq:
-                slot.last = slot.session.observation()
+                self._observe(slot)
                 slot.state = "ready"
         elif kind == proto.ERROR:
             self._fail(slot, "refused: " + payload.decode(errors="replace"), now)
+
+    def _observe(self, slot):
+        slot.last = slot.session.observation()
+        if self.frames is not None:
+            frame = slot.session.frame()
+            slot.last_frame = frame if frame is not None else 0
 
     def _send(self, slot, data, now):
         try:
@@ -310,13 +346,17 @@ class Fleet:
                     self._begin_reset(slot, now)
         states = np.stack([s.last[0] for s in self.slots])
         infos = [dict(s.last[1], episode_start=True) for s in self.slots]
+        if self.frames is not None:
+            for i, s in enumerate(self.slots):
+                self.frames[i] = s.last_frame
         for s in self.slots:
             s.episode_start = False
         return states, infos
 
     def step(self, actions):
         """`actions[i]` is `(buttons, hotbar, yaw, pitch)` for slot `i` (ignored when it isn't
-        active). Returns `states (n, L), infos, terminated, truncated, active`."""
+        active). Returns `states (n, L), infos, terminated, truncated, active`; with images,
+        `self.frames` (n, h, w) holds the frames of the same observations."""
         now = time.monotonic()
         budget = self.config.step_timeout + self.config.frame_skip * 0.05
         for slot in self.slots:
@@ -377,6 +417,9 @@ class Fleet:
                 slot.reason = None
             if terminated[i] or truncated[i]:
                 self._begin_reset(slot, now)
+        if self.frames is not None:
+            for i, slot in enumerate(self.slots):
+                self.frames[i] = slot.last_frame if active[i] else 0
         return states, infos, terminated, truncated, active
 
     def stats(self):

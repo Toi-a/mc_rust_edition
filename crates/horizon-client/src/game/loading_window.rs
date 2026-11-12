@@ -24,7 +24,8 @@ pub(super) fn prepare_renderer_textures(
 
 /// Upload pack textures and create the renderer on the window's device.
 pub(super) fn build_renderer(
-    window: Arc<Window>,
+    // None: no window (`--headless --render`), offscreen.
+    window: impl Into<Option<Arc<Window>>>,
     offscreen: bool,
     pack: &PackResources,
     gui: &UiResources,

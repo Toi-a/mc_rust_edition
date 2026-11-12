@@ -22,7 +22,10 @@
 //!   a slow Python slows a client's ticks by 5 % at most and still shows as late ticks.
 
 mod fair_play;
+mod image;
 mod reconnect;
+
+pub(in super::super) use image::parse_image_size;
 
 use super::super::{Game, Screen};
 use fair_play::{SelfView, TargetView};
@@ -50,6 +53,10 @@ pub(in super::super) struct RlOptions {
     pub target: Option<String>,
     /// `--rl-step-grace MS`: the longest wait for an owed step ([`STEP_GRACE`] when unset).
     pub step_grace_ms: Option<u64>,
+    /// `--rl-image WxH`: grayscale frames of the view in the shared memory ([`image`]).
+    pub image: Option<[u32; 2]>,
+    /// `--rl-hud`: those frames show the HUD (hidden by default, as F1).
+    pub hud: bool,
 }
 
 /// The held keys, by their action bit, as the default key bindings name them.
@@ -137,6 +144,8 @@ pub(super) struct Session {
     reconnects: u32,
     /// The waiting for steps still allowed (see [`STEP_GRACE`]).
     shift_budget: Duration,
+    /// Image observations, with `--rl-image`.
+    frames: Option<image::Frames>,
 }
 
 impl Session {
@@ -149,7 +158,8 @@ impl Session {
             p.push(".shm");
             p.into()
         });
-        let layout = ShmLayout::new(0, 0);
+        let [w, h] = options.image.unwrap_or([0, 0]);
+        let layout = ShmLayout::new(w, h);
         let shm = File::options()
             .read(true)
             .write(true)
@@ -158,7 +168,6 @@ impl Session {
             .open(&shm_path)?;
         shm.set_len(layout.size as u64)?;
         Ok(Session {
-            options,
             listener,
             conn: None,
             shm,
@@ -189,6 +198,8 @@ impl Session {
             disconnects: 0,
             reconnects: 0,
             shift_budget: SHIFT_SAVED,
+            frames: options.image.map(image::Frames::new),
+            options,
         })
     }
 
@@ -242,6 +253,12 @@ impl Session {
         put("disconnected", s.disconnected as f32);
         put("disconnects_total", self.disconnects as f32);
         put("reconnects_total", self.reconnects as f32);
+        let frames = self.frames.as_ref();
+        put(
+            "frame_fresh",
+            frames.map_or(0.0, |f| f32::from(u8::from(f.fresh))),
+        );
+        put("frame_ms", frames.map_or(0.0, |f| f.ms));
         out
     }
 }
@@ -293,6 +310,10 @@ impl Game<'_> {
             Ok(mut s) => {
                 s.items = super::super::remote::builtin_registries(&self.options.resources);
                 log::info!("RL session on {}", s.options.socket.display());
+                // The frames show the HUD only when asked (F1's hideGui otherwise).
+                if s.options.image.is_some() && !s.options.hud {
+                    self.ui.hide_gui = true;
+                }
                 self.agent.rl = Some(Box::new(s));
             }
             Err(e) => log::error!("RL session: {e}"),
@@ -313,6 +334,14 @@ impl Game<'_> {
         let Some(mut s) = self.agent.rl.take() else {
             return;
         };
+        // An observation still waiting for its frame: no frame was drawn since its tick (no
+        // renderer, or the frame failed). It goes out with the last frame.
+        if let Some(seq) = s.frames.as_mut().and_then(|f| f.due.take()) {
+            if let Some(f) = s.frames.as_mut() {
+                f.fresh = false;
+            }
+            self.rl_write(&mut s, seq);
+        }
         match s.listener.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(true).ok();
@@ -665,11 +694,11 @@ impl Game<'_> {
             s.reset = false;
             s.signals = Signals::default();
             s.signals.ticks = 1;
-            self.rl_write(&mut s, 0);
+            self.rl_observe(&mut s, 0);
         } else if let Some((seq, left)) = s.running {
             if left <= 1 {
                 s.running = None;
-                self.rl_write(&mut s, seq);
+                self.rl_observe(&mut s, seq);
             } else {
                 s.running = Some((seq, left - 1));
             }
@@ -723,6 +752,14 @@ impl Game<'_> {
             s.signals.target_damage += before - health;
         }
         s.target_health = Some(health);
+    }
+
+    /// A step's observation is due: written now, or after the frame drawn for it.
+    fn rl_observe(&mut self, s: &mut Session, seq: u64) {
+        match s.frames.as_mut() {
+            Some(f) => f.due = Some(seq),
+            None => self.rl_write(s, seq),
+        }
     }
 
     /// Writes the observation and info, then tells Python (`READY`).

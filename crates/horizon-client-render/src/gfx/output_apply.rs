@@ -266,8 +266,11 @@ impl Renderer {
             self.display_fresh = false;
             self.reading.stop_watching();
         } else if self.display.is_none() {
-            let (watch, now) =
-                DisplayWatch::new(&self.window, self.surface.as_deref(), &self.adapter);
+            let (watch, now) = DisplayWatch::new(
+                self.window.as_deref(),
+                self.surface.as_deref(),
+                &self.adapter,
+            );
             self.display = Some(watch);
             self.output_caps.hdr = self.surface_offer().unwrap_or(self.output_caps.hdr);
             self.reading = now;

@@ -25,7 +25,9 @@ def parse(argv=None):
     p.add_argument("--target", help="each client's opponent, a format of {i}")
     p.add_argument("--pairs", action="store_true", default=None,
                    help="clients 2k and 2k+1 are each other's opponent")
-    p.add_argument("--obs", choices=["state"], help="observation mode (images come with M3)")
+    p.add_argument("--obs", choices=["state", "image", "both"], help="observation mode")
+    p.add_argument("--image-size", help="WxH of the grayscale frames (default 64x64)")
+    p.add_argument("--hud", action="store_true", default=None, help="draw the HUD in the frames")
     p.add_argument("--frame-skip", type=int)
     p.add_argument("--render-distance", type=int)
     p.add_argument("--workers", type=int, help="worker threads per client")
@@ -38,9 +40,17 @@ def parse(argv=None):
     return p.parse_args(argv)
 
 
+def image_size(text):
+    if not text:
+        return None
+    w, _, h = text.lower().partition("x")
+    return (int(w), int(h))
+
+
 def config_of(args):
     overrides = {"server": args.server, "n": args.n, "names": args.names, "target": args.target,
                  "pairs": args.pairs, "obs": args.obs, "frame_skip": args.frame_skip,
+                 "image_size": image_size(args.image_size), "hud": args.hud,
                  "render_distance": args.render_distance, "workers": args.workers,
                  "stagger": args.stagger, "root": args.root, "binary": args.binary,
                  "resources": args.resources}

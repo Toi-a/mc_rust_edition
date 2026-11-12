@@ -981,6 +981,16 @@ impl super::Device {
     }
 }
 
+/// Horizon (RL fleets, docs/rl/design.md): `HORIZON_NO_BAR_UPLOADS=1` keeps mappable upload
+/// buffers in plain system memory instead of the device-local, host-visible heap
+/// gpu-allocator prefers for them. Without Resizable BAR that heap is the GPU's 256 MiB BAR1
+/// window, shared by every process: a few dozen processes each mapping blocks there run it out,
+/// and the next device fails to open ("Parent device is lost").
+fn no_bar_uploads() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HORIZON_NO_BAR_UPLOADS").is_some_and(|v| v == "1"))
+}
+
 impl crate::Device for super::Device {
     type A = super::Api;
 
@@ -1006,6 +1016,7 @@ impl crate::Device for super::Device {
         let is_cpu_write = desc.usage.contains(wgt::BufferUses::MAP_WRITE);
 
         let location = match (is_cpu_read, is_cpu_write) {
+            (_, true) if no_bar_uploads() => gpu_allocator::MemoryLocation::GpuToCpu,
             (true, true) => gpu_allocator::MemoryLocation::CpuToGpu,
             (true, false) => gpu_allocator::MemoryLocation::GpuToCpu,
             (false, true) => gpu_allocator::MemoryLocation::CpuToGpu,
