@@ -6,9 +6,7 @@
     "horizon": ["platform", "horizon"]
   },
   "workspaces": [
-    "Cargo.toml",
-    "crates/horizon-telemetry-server/Cargo.toml",
-    "crates/horizon-mod-registry/Cargo.toml"
+    "Cargo.toml"
   ],
   "crates": {
     "horizon-assets": "engine",
@@ -53,13 +51,11 @@
     "horizon-cosmetics": "horizon",
     "horizon-friends": "horizon",
     "horizon-heartbeat": "horizon",
-    "horizon-mod-registry": "horizon",
     "horizon-official": "horizon",
     "horizon-relay": "horizon",
     "horizon-release-sign": "horizon",
     "horizon-server": "horizon",
     "horizon-telemetry": "horizon",
-    "horizon-telemetry-server": "horizon",
 
     "horizon-bots": "tool",
     "horizon-mod-api-gen-tests": "tool",
