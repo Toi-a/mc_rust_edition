@@ -155,8 +155,10 @@ impl Game<'_> {
         let renderer = match self.renderer.is_some() {
             true => {
                 // Built from the same packs as the first client's: its read-only textures
-                // serve this one too (gfx/share.rs).
-                let _siblings = horizon_client::gfx::share::Siblings::hold();
+                // serve this one too; the atlas only without the HUD, where no text writes
+                // glyphs into it (gfx/share.rs).
+                let hud = options.rl.as_ref().is_some_and(|rl| rl.hud);
+                let _siblings = horizon_client::gfx::share::Siblings::hold(!hud);
                 let mut r =
                     self.renderer_for(None::<Arc<winit::window::Window>>, &self.pack, &gui)?;
                 let [w, h] = options.window_size;

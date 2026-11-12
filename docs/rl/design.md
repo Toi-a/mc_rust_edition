@@ -559,10 +559,12 @@ GUI; one 2D texture) is 96 MB, the **block sprites** (texture arrays with mipmap
 **terrain arena** 30.3 MB, pre-sized at 1 M vertices while render distance 2 fills 4.7 MB of it.
 Everything else is under 13 MB. Two changes:
 
-- Model B's clients reuse the first renderer's shared atlas and block sprites (`gfx/share.rs`, held
-  by `shard.rs` while it makes a sibling's renderer; a pack reload still builds its own). The atlas
-  is never written after it is made; the block sprites' animated layers (water, lava, fire) are
-  written by every sibling with its own tick, so such a frame may be another client's tick.
+- Model B's clients reuse the first renderer's block sprites and, without `--rl-hud`, its shared
+  atlas (`gfx/share.rs`, held by `shard.rs` while it makes a sibling's renderer; a pack reload
+  still builds its own). Animated sprites (water, lava, fire, animated items) are written by every
+  sibling with its own tick, so such a frame may be another client's tick. Text writes glyphs
+  outside the font sheets into a region of the atlas each client fills on its own: it is drawn
+  only with the HUD, hence no atlas sharing with `--rl-hud` (those clients keep ~96 MB more).
 - `HORIZON_SECTION_ARENA_VERTICES` sets the terrain arena's first page (it grows on demand); the
   fleet sets 2^18 vertices (~7.5 MB) for image clients.
 

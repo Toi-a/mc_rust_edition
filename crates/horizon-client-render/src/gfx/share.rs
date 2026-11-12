@@ -1,37 +1,42 @@
 //! Read-only textures shared by the renderers of one process (RL process model B,
-//! docs/rl/design.md "Model B measurements"): K headless clients on one device would otherwise each
+//! docs/rl/design.md "M5 measurements"): K headless clients on one device would otherwise each
 //! upload the same pack, ~126 of a 64x64 image client's ~170 MB of GPU memory. A sibling
 //! renderer, made with `previous` set while [`Siblings`] is held, takes the previous renderer's
-//! shared atlas (entities, items, GUI: never written after it is made) and block sprites. The
-//! block sprites' animated layers are then written by every sibling with its own tick: the
-//! frames of water or fire may come from another client's tick, which a policy can't tell.
-//! A pack reload (`previous` without the guard) still builds its own.
+//! block sprites and, unless the HUD draws, its shared atlas (entities, items, GUI, fonts).
+//!
+//! What still writes into them: animated sprites (water, fire, and the atlas's animated items),
+//! which every sibling uploads with its own tick, so such a frame may be another client's tick;
+//! and text, whose glyphs outside the font sheets are rasterized into a region of the atlas that
+//! each client fills on its own. Text is only drawn with the HUD (`--rl-hud`), so the atlas is
+//! shared only without it. A pack reload (`previous` without the guard) still builds its own.
 
 use super::Renderer;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
-static SIBLINGS: AtomicBool = AtomicBool::new(false);
+/// 0: nothing shared; 1: block sprites; 2: block sprites and the atlas.
+static SIBLINGS: AtomicU8 = AtomicU8::new(0);
 
 /// While it lives, a renderer made with `previous` shares that renderer's read-only textures:
 /// only for renderers built from the same packs (the clients of one RL process).
 pub struct Siblings(());
 
 impl Siblings {
-    pub fn hold() -> Self {
-        SIBLINGS.store(true, Ordering::SeqCst);
+    /// `atlas`: share the shared atlas too (only when no text is drawn: no HUD).
+    pub fn hold(atlas: bool) -> Self {
+        SIBLINGS.store(if atlas { 2 } else { 1 }, Ordering::SeqCst);
         Self(())
     }
 }
 
 impl Drop for Siblings {
     fn drop(&mut self) {
-        SIBLINGS.store(false, Ordering::SeqCst);
+        SIBLINGS.store(0, Ordering::SeqCst);
     }
 }
 
 pub(super) fn sibling(previous: Option<&Renderer>) -> Option<&Renderer> {
-    previous.filter(|_| SIBLINGS.load(Ordering::SeqCst))
+    previous.filter(|_| SIBLINGS.load(Ordering::SeqCst) > 0)
 }
 
 /// The sibling's block sprite arrays, and their mip level count in `mip_levels`.
@@ -46,7 +51,8 @@ pub(super) fn sprites(
 
 /// The sibling's shared atlas.
 pub(super) fn atlas(sibling: Option<&Renderer>) -> Option<wgpu::Texture> {
-    sibling?.hud.atlas_texture.clone()
+    let sibling = sibling.filter(|_| SIBLINGS.load(Ordering::SeqCst) == 2)?;
+    sibling.hud.atlas_texture.clone()
 }
 
 impl Renderer {
