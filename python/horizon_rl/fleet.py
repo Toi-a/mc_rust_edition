@@ -185,6 +185,10 @@ class Fleet:
             # Uploads in system memory, not the GPU's small BAR1 window, which every process
             # shares: N clients mapping blocks there run it out (third_party/wgpu-hal).
             env["HORIZON_NO_BAR_UPLOADS"] = os.environ.get("HORIZON_NO_BAR_UPLOADS", "1")
+            # The terrain arena's first page: a 64x64 view at render distance 2 fills ~5 MB of
+            # the default ~30 MB (it grows on demand) (gfx/arena.rs).
+            env["HORIZON_SECTION_ARENA_VERTICES"] = os.environ.get("HORIZON_SECTION_ARENA_VERTICES",
+                                                                   str(1 << 18))
             render_options = RENDER_OPTIONS
         peers = [(s.name, c.target_of(s.index)) for s in group[1:]]
         proc = ClientProcess(c.server, slot.name, self.root, render_distance=c.render_distance,
@@ -243,7 +247,10 @@ class Fleet:
             if slot.state == "starting":
                 self._try_connect(slot, now)
         for key, _ in self.selector.select(timeout):
-            self._read(key.data, time.monotonic())
+            # A failure earlier in this batch may have closed this socket: a shard's process
+            # dying shows on all its sockets at once, and the first one read restarts them all.
+            if key.data.sock is key.fileobj:
+                self._read(key.data, time.monotonic())
         now = time.monotonic()
         for slot in self.slots:
             if slot.state in ("backoff",):
