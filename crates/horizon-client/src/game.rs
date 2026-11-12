@@ -161,15 +161,12 @@ mod fov;
 mod foxes;
 mod frame_geometry;
 mod frames;
-#[cfg(feature = "friends")]
-mod friends;
 mod held_items;
 #[cfg(test)]
 mod setblock_order_tests;
 // Without Play with Friends: nothing shared, no Friends button (game/friends_off.rs).
 #[cfg(test)]
 mod entity_inside_tests;
-#[cfg(not(feature = "friends"))]
 #[path = "game/friends_off.rs"]
 mod friends;
 mod functions;
@@ -2903,9 +2900,6 @@ struct Game<'a> {
     level_shapes: horizon_client::chunk::LevelShapes,
     /// This game is that server thread's (game/integrated.rs).
     serving: Option<integrated::Serving>,
-    /// The open world is shared behind an invite code (game/friends.rs).
-    #[cfg(feature = "friends")]
-    friends: Option<friends::Sharing>,
     /// The Social Interactions screen and the players whose chat is hidden (game/social.rs).
     social: social::Social,
     world_options: Option<lan_screen::WorldOptions>,
@@ -12489,8 +12483,6 @@ impl<'a> Game<'a> {
             test_defs_snapshot: false,
             test_highlights: HashMap::new(),
             game_tests: game_tests::GameTests::default(),
-            #[cfg(feature = "friends")]
-            friends: None,
             social: Default::default(),
             debug_keys: Default::default(),
             debug_charts: Default::default(),

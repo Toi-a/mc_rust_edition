@@ -2297,25 +2297,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "friends")]
-    #[test]
-    fn direct_connection_joins_a_pasted_invite_and_keeps_host_names() {
-        let invite = horizon_friends::invite::Invite {
-            secret: *b"0123456789",
-            port: 25580,
-            endpoints: vec!["192.168.1.20:25580".parse().unwrap()],
-            relay: None,
-        }
-        .encode();
-        assert_eq!(
-            direct_address(&format!(" {invite} ")),
-            format!("{}{invite}", crate::net::FRIEND)
-        );
-        for host in ["localhost", "example.org:25566", "abcdefgh", "[::1]:25568"] {
-            assert_eq!(direct_address(host), host);
-        }
-    }
-
     #[test]
     fn ping_tooltip_follows_only_visible_status_bars_and_current_ping() {
         let servers: Vec<_> = (0..6)

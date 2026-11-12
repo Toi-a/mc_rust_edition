@@ -33,8 +33,6 @@ members = [
     "crates/horizon-platform",
     "crates/horizon-hooks",
     "crates/horizon-bench",
-    "crates/horizon-friends",
-    "crates/horizon-relay",
     "crates/horizon-mods",
     "crates/horizon-mod-api-gen",
     "crates/horizon-mod-api-gen/dispatch-tests",
