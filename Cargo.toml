@@ -38,14 +38,12 @@ members = [
     "crates/horizon-mods",
     "crates/horizon-mod-api-gen",
     "crates/horizon-mod-api-gen/dispatch-tests",
-    "crates/cargo-horizon-mod",
     "crates/horizon-shaders",
     "crates/horizon-render-pipeline",
     "crates/horizon-optifine",
     "crates/horizon-polytone",
     "crates/horizon-shader-api",
     "crates/horizon-release-sign",
-    "crates/horizon-mod-deps",
     "xtask",
 ]
 resolver = "2"
