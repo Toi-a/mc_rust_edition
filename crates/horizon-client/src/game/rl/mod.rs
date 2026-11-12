@@ -361,6 +361,7 @@ impl Game<'_> {
                 }
             }
         }
+        let mut reset_release = false;
         for (k, payload) in messages {
             let hello = s.conn.as_ref().is_some_and(|c| c.hello);
             match k {
@@ -393,9 +394,16 @@ impl Game<'_> {
                     s.pending = None;
                     s.running = None;
                     s.reset = true;
+                    // An episode starts with nothing held: the keys of the last one (often
+                    // still pressed at death) let go, so the ticks before the new episode's
+                    // first step are spent standing.
+                    reset_release = true;
                 }
                 _ => closed = true,
             }
+        }
+        if reset_release {
+            self.rl_release(&mut s);
         }
         if closed {
             s.conn = None;

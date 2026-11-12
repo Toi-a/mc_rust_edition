@@ -214,7 +214,9 @@ or the `horizon-rl` command.
   (`crash (…)`, `hang`, `timeout`, `disconnected: <reason>`). A death is `terminated`. An ended slot
   resets by itself: it is left out of the next steps (`active` False) until it is alive again, and
   its first observation comes with `info["episode_start"]`. A fault between episodes is named in
-  that first info's `reset_reason`. No fault touches another slot (`python/tests/e2e_fleet.py`
+  that first info's `reset_reason`. A `RESET` lets go of every held key, so the tick or two
+  before the new episode's first step (its observation arrives between batches) are spent
+  standing, reported in `late_ticks`. This is Gymnasium's next-step autoreset, which M4 maps onto. No fault touches another slot (`python/tests/e2e_fleet.py`
   checks a kill, a kick, a SIGSTOP hang and a death on four fighting clients).
 - Joins are staggered (`stagger`, default 250 ms; restarts too). Paper's `bukkit.yml`
   `settings.connection-throttle` (default 4000 ms per IP) would otherwise reject N clients from
