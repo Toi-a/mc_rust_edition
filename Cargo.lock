@@ -1678,15 +1678,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "horizon-game"
-version = "0.1.0"
-dependencies = [
- "horizon-client",
- "horizon-mods",
- "horizon-threads",
-]
-
-[[package]]
 name = "horizon-hdr"
 version = "0.1.0"
 dependencies = [
@@ -1695,15 +1686,6 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wgpu",
-]
-
-[[package]]
-name = "horizon-heartbeat"
-version = "0.1.0"
-dependencies = [
- "horizon-platform",
- "horizon-telemetry",
- "log",
 ]
 
 [[package]]
@@ -1788,17 +1770,6 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "windows 0.62.2",
-]
-
-[[package]]
-name = "horizon-official"
-version = "0.1.0"
-dependencies = [
- "horizon-game",
- "horizon-heartbeat",
- "horizon-platform",
- "log",
- "winresource",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 //! Windows executables' resources, shared by the build scripts of the game's executables
-//! (`crates/horizon-client/build.rs`, `crates/horizon-official/build.rs`, which include it with
+//! (`crates/horizon-client/build.rs`, which includes it with
 //! `#[path]`). Embeds Horizon's icon (`packaging/icons/horizon.ico`) as icon resource 1: Explorer
 //! and the task bar show it, and the window takes it as its icon. The optional Segment Heap
 //! manifest (`crates/horizon-client/windows-segment-heap.manifest`, the package's
