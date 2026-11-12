@@ -137,7 +137,7 @@ folder (`NAME/`); the process's log is in its first slot's folder.
 from horizon_rl import HorizonVecEnv, rewards
 
 env = HorizonVecEnv(server="HOST:PORT", n=8, pairs=True, obs="both", camera="delta",
-                    reward=rewards.duel)           # starts the 8 clients
+                    reward=rewards.duel)           # starts the 8 clients; frame skip 1: a step is a tick
 obs, infos = env.reset()                           # all alive in the world
 while training:
     actions = policy(obs)                          # or env.action_space.sample()
@@ -160,20 +160,30 @@ stand-in server (`--server HOST:PORT` for a real one).
 - **Observation space**, by `obs`: `"state"`: `Box(-inf, inf, (L,), float32)`, the fair-play
   vector (`env.state_fields`: name -> slice; `env.items`: the item registry its item indices
   refer to); `"image"`: `Box(0, 255, (H, W), uint8)`; `"both"`: a `Dict` with `state` and `image`.
-- **Action space**: `Dict(buttons=MultiBinary(9), hotbar=Discrete(10), look=...)`. `buttons` in
-  the order of `horizon_rl.actions.BUTTON_NAMES` (forward, back, left, right, jump, sprint, sneak,
-  attack, use): held while 1, except `attack`, one click per step. `hotbar`: 0 keeps the slot,
-  1..9 select. `look` depends on `camera=`:
-  - `"absolute"` (default): `Box([-180, -90], [180, 90])`, the yaw and pitch to face;
-  - `"delta"`: `Box(-delta_max, delta_max, (2,))`, a turn in degrees per step (`delta_max=30`);
-  - `"bins"`: `MultiDiscrete([B, B])`, indices into `bins=` (turns in degrees; default
-    -45, -15, -5, -1.5, 0, 1.5, 5, 15, 45).
-
-  Turns are added to the yaw and pitch of the last observation, in Python; the game still gets
-  absolute angles.
-- **Human caps**, off by default: `max_turn=` (degrees, the largest turn per step on each axis;
-  an absolute target further away is approached by the short way) and `max_cps=` (attack clicks
-  per second; a click over the rate is dropped, the other keys of that action stay).
+- **Action space**, built from parts so a first policy can start small and later ones get
+  more (`horizon_rl.actions.ActionCodec`). By default
+  `Dict(buttons=MultiBinary(9), hotbar=Discrete(10), look=...)`:
+  - `buttons=`: the keys the policy has, a subset of `BUTTON_NAMES` (forward, back, left, right,
+    jump, sprint, sneak, attack, use), e.g. `buttons=("forward", "back", "jump", "attack")`. Held
+    while 1, except `attack`, one click per step. Keys left out are never pressed.
+  - `hotbar=False` drops the hotbar (otherwise 0 keeps the slot, 1..9 select).
+  - `camera=`: `"absolute"` (default): `Box([-180, -90], [180, 90])`, the yaw and pitch to face;
+    `"delta"`: a `Box` of turns in degrees per tick (`delta_max=`, by default what the turn cap
+    allows); `"bins"`: `MultiDiscrete([B, B])`, indices into `bins=` (turns in degrees; default
+    -45, -15, -5, -1.5, 0, 1.5, 5, 15, 45); `"aim"`: no `look`, the env faces the opponent for
+    the policy. Turns are added to the yaw and pitch of the last observation, in Python; the
+    game still gets absolute angles.
+  - `flat=True`: one array per action instead of a dict, for trainers without `Dict` action
+    spaces (Stable-Baselines3): a `MultiDiscrete` (one column per button, then the hotbar, then
+    the yaw and pitch bins) with the `"bins"` and `"aim"` cameras; a `Box(-1, 1)` with the
+    continuous ones (a key is held while its value is above 0, the look spans the allowed turn;
+    no hotbar).
+- **`camera="aim"` is aim assist**: a training aid for a first stage, not fair play. It uses only
+  the opponent's bearing from the observation, and obeys the turn cap.
+- **Human caps**: `max_turn=(yaw, pitch)`, the largest turn per tick in degrees, 0 for no cap
+  on an axis. Default `(90, 0)`: at most 90 degrees left or right per tick, any pitch; an absolute
+  target further away is approached by the short way. `max_cps=` (default 0, off): attack clicks
+  per second; a click over the rate is dropped, the other keys of that action stay.
 - **Reward**: 0 unless `reward=` is given: a function of the step's `infos` returning the
   rewards. `horizon_rl.rewards.duel` is damage dealt minus damage taken, as the client sees them.
   Every signal is in `infos` ([design.md](design.md#rewards-episodes-and-info)), each as an
@@ -187,6 +197,17 @@ stand-in server (`--server HOST:PORT` for a real one).
   `infos["episode_start"][i]`. **`infos["valid"][i]`** is True exactly when row `i` is a real
   transition (the agent acted on its previous observation and this is what followed): put only
   those rows in a replay buffer or rollout, and cut the trajectory at `episode_start`.
+- **Policy updates**: the game doesn't wait while a trainer computes. Call `env.release()`
+  before a pause of more than a tick or two (a PPO update): it lets go of every agent's keys, so
+  they stand still instead of running on with their last action.
+- **Stable-Baselines3** (optional, `pip install stable-baselines3`):
+  `horizon_rl.sb3.HorizonSB3VecEnv(env)` is SB3's `VecEnv` over a `flat=True` env, and
+  `ReleaseKeys()` the callback that calls `release()` after each rollout.
+  `python/examples/train_sb3.py --local -n 4 --steps 20000` trains PPO in self-play (agents in
+  pairs, one shared policy), in stages: `--stage sword` (forward, back, jump, attack, aim
+  assist), `aim` (plus strafing and sprint, camera by bins), `full`. SB3 can't skip rows, so the
+  ~20 steps an agent waits for its respawn are stored as steps of its next episode with reward
+  0 (`info["valid"]` False).
 - **PettingZoo** (optional, `pip install pettingzoo`): `horizon_rl.parallel.HorizonParallelEnv`
   is a `ParallelEnv` over the same vector env, with the players' names as agents. An agent whose
   episode ended leaves `agents` and comes back by itself when its next one starts.

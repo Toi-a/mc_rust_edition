@@ -9,7 +9,8 @@ steps give observations inside the declared spaces at 20 steps per second; rando
 the action space are played; scripted fights through the Gymnasium actions land hits, and the
 duel reward is the damage dealt minus the damage taken; a death is `terminated`, then the agent is no
 transition until its new episode starts, while the others' rows stay valid; a kick is
-`truncated` with its reason. Then a one-agent `HorizonEnv` with the delta camera: turns add up,
+`truncated` with its reason; a staged action space (four keys, aim assist) keeps each agent
+facing its opponent. Then a one-agent `HorizonEnv` with the delta camera: turns add up,
 a death terminates and `reset` brings the agent back alive.
 """
 import sys
@@ -134,6 +135,18 @@ def vector(server, root):
         back = play(60, until=lambda: state["started"][0] > before)
         check(back and any(r.startswith("disconnected") for r in state["ended"][0]),
               f"a kick truncates with its reason and the agent comes back ({state['ended'][0]})")
+
+        # The first training stage's actions on the same clients: four keys, aim assist, flat.
+        staged = HorizonVecEnv(fleet=env.fleet, camera="aim", buttons=("forward", "back", "jump", "attack"),
+                               hotbar=False, flat=True)
+        check(staged.single_action_space.shape == (4,), f"a staged action space ({staged.single_action_space})")
+        obs, _ = staged.reset()
+        for _ in range(40):  # opponents show up a few ticks after the respawn
+            obs, _, _, _, infos = staged.step(np.zeros((N, 4), int))
+        present = obs["state"][:, env.state_fields["target_present"].start] > 0.5
+        off = np.abs(obs["state"][:, env.state_fields["target_bearing"]][present])
+        check(present.sum() >= 2 and off.max() < 1.0,
+              f"aim assist keeps every agent facing its opponent ({present.sum()} agents, off by {off.max():.2f} degrees)")
     finally:
         env.close()
 

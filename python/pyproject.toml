@@ -12,6 +12,7 @@ dependencies = ["numpy>=1.24", "gymnasium>=0.29"]
 [project.optional-dependencies]
 bench = ["psutil>=5.9"]
 pettingzoo = ["pettingzoo>=1.24"]
+sb3 = ["stable-baselines3>=2.3"]
 
 [project.scripts]
 horizon-rl = "horizon_rl.launch:main"

@@ -141,7 +141,8 @@ packets, with nothing extra.
 The client sets the player's yaw and pitch (pitch clamped to ±90 as in vanilla) before the tick's
 movement, so the rotation reaches the server in the normal movement packet, as a mouse turn would.
 A `NaN` component keeps the current angle. Python wrappers can offer deltas or bins on top of it.
-Optional human caps (off by default): the largest turn per tick, and clicks per second.
+Human caps, applied in Python: the largest turn per tick (default: 90 degrees of yaw, any pitch)
+and, optionally, clicks per second.
 
 The agent cannot reach `goto`, `look-at`, aimed `attack ID`, commands, chat sending or teleports.
 The RL socket has no message for any of them.
@@ -277,7 +278,17 @@ or the `horizon-rl` command.
     and bins are added in Python to the last observed yaw and pitch; the wire stays absolute.
     They are a setting of the env, not Gymnasium wrappers: the turn needs the env's last
     observation, and one codec serves the single, vector and PettingZoo envs.
-  - Human caps (`max_turn`, `max_cps`; off by default) are applied in the same codec.
+  - The action space is built from parts (decided 2026-11-12, for training in stages): which
+    buttons the policy has, whether it has the hotbar, the camera mode, and `flat=True` for one
+    `MultiDiscrete` or `Box` instead of a `Dict` (Stable-Baselines3 takes no `Dict` actions).
+    `camera="aim"` faces the opponent for the policy from the observed bearing: aim assist, a
+    training aid for a first stage and the one deliberate exception to "no aim helpers".
+  - Human caps, in the same codec. Decided 2026-11-12: the policy acts every tick (frame skip
+    1), and a tick turns at most 90 degrees of yaw and any pitch (`max_turn=(90, 0)`, the
+    default). `max_cps` stays off by default.
+  - `release()`: one step that holds nothing and keeps the view, for the pauses of a trainer (a
+    PPO update takes seconds; the game runs on with sticky keys). `sb3.py` has SB3's `VecEnv`
+    over the env and the callback that releases after each rollout.
   - **Autoreset**: Gymnasium's next-step mode, stretched over the reset's real duration. The
     fleet's `active` mask and `episode_start` go into `infos`, with `valid = active and not
     episode_start`: the rows that are real transitions. An inactive agent's row repeats its last

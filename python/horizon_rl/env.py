@@ -18,11 +18,21 @@ import numpy as np
 from gymnasium.vector import AutoresetMode, VectorEnv
 from gymnasium.vector.utils import batch_space
 
-from .actions import DEFAULT_BINS, ActionCodec
+from .actions import BUTTON_NAMES, DEFAULT_BINS, DEFAULT_MAX_TURN, ActionCodec
 from .fleet import Fleet, FleetConfig
 
-_CODEC_DEFAULTS = {"camera": "absolute", "delta_max": 30.0, "bins": DEFAULT_BINS, "max_turn": 0.0,
-                   "max_cps": 0.0}
+# The action settings of the envs (`ActionCodec`'s), and their defaults.
+_CODEC_DEFAULTS = {"camera": "absolute", "buttons": BUTTON_NAMES, "hotbar": True, "flat": False,
+                   "delta_max": None, "bins": DEFAULT_BINS, "max_turn": DEFAULT_MAX_TURN, "max_cps": 0.0}
+
+
+def _encode(codec, actions, states, fields):
+    """`actions` for the game, turned from where the `states` (n, L) say each agent looks."""
+    aim = None
+    if codec.camera == "aim":
+        # The turn to the opponent is part of the observation; none while there is no opponent.
+        aim = states[:, fields["target_bearing"]] * (states[:, fields["target_present"]] > 0.5)
+    return codec.encode(actions, states[:, fields["self_yaw"].start], states[:, fields["self_pitch"].start], aim)
 
 
 def _open(config, fleet, n, settings):
@@ -61,9 +71,9 @@ class HorizonVecEnv(VectorEnv):
     observation (one game tick with frame skip 1: 20 steps per second).
 
     `HorizonVecEnv(FleetConfig(server=..., n=8, pairs=True))`, or the settings as keywords
-    (`HorizonVecEnv(server=..., n=8)`). Action settings: `camera`, `delta_max`, `bins`,
-    `max_turn`, `max_cps` (`ActionCodec`). `reward`: a function of the step's `infos`
-    returning (n,) rewards.
+    (`HorizonVecEnv(server=..., n=8)`). Action settings: `camera`, `buttons`, `hotbar`, `flat`,
+    `delta_max`, `bins`, `max_turn`, `max_cps` (`ActionCodec`). `reward`: a function of the
+    step's `infos` returning (n,) rewards.
 
     Episodes use Gymnasium's next-step autoreset, stretched: a reset takes game time (a respawn a
     few ticks, a restart seconds). After the step that ends agent `i`'s episode (`terminated`: it
@@ -89,10 +99,9 @@ class HorizonVecEnv(VectorEnv):
         self.single_action_space = self.codec.space
         self.observation_space = batch_space(self.single_observation_space, n)
         self.action_space = batch_space(self.single_action_space, n)
-        self._yaw = self.state_fields["self_yaw"].start
-        self._pitch = self.state_fields["self_pitch"].start
         self._states = np.zeros((n, self.fleet.state_len), np.float32)
         self._frames = None if self.fleet.frames is None else np.zeros_like(self.fleet.frames)
+        self._ended = None  # episodes that ended in `release`, for the next step to report
         self.closed = False
 
     def _observations(self):
@@ -124,24 +133,41 @@ class HorizonVecEnv(VectorEnv):
         if seed is not None:
             self._np_random, self._np_random_seed = gym.utils.seeding.np_random(seed)
         states, infos = self.fleet.reset()
+        self._ended = None
         every = np.ones(self.num_envs, bool)
         self._keep(states, every)
         out = self._infos(infos, every)
         out["valid"] = np.zeros(self.num_envs, bool)
         return self._observations(), out
 
+    def release(self):
+        """Lets go of every agent's keys and keeps its view: one step that is no transition.
+        Call it before the trainer stops stepping for a while (a policy update): the game doesn't
+        wait, and an agent left alone goes on with the keys of its last action. Released, the
+        agents stand until the next `step`. An episode that ends meanwhile is reported by that
+        step."""
+        nan = float("nan")
+        states, _, terminated, truncated, active = self.fleet.step([(0, 0, nan, nan)] * self.num_envs)
+        self._keep(states, active)
+        if self._ended is not None:
+            terminated, truncated = terminated | self._ended[0], truncated | self._ended[1]
+        self._ended = (terminated, truncated)
+
     def step(self, actions):
-        buttons, hotbar, yaw, pitch = self.codec.encode(
-            actions, self._states[:, self._yaw], self._states[:, self._pitch])
+        buttons, hotbar, yaw, pitch = _encode(self.codec, actions, self._states, self.state_fields)
         states, infos, terminated, truncated, active = self.fleet.step(
             list(zip(buttons.tolist(), hotbar.tolist(), yaw.tolist(), pitch.tolist())))
+        if self._ended is not None:
+            terminated, truncated = terminated | self._ended[0], truncated | self._ended[1]
+            self._ended = None
         self._keep(states, active)
         out = self._infos(infos, active)
         valid = out["valid"]
         rewards = np.zeros(self.num_envs, np.float32)
-        if self.reward_fn is not None and valid.any():
-            # Rows that are no transition have no signals: their reward stays 0.
-            rewards[valid] = np.asarray(self.reward_fn(out), np.float32)[valid]
+        # Rows without signals (no transition, or a fault cut the step) keep a reward of 0.
+        paid = valid & out.get("_tick", False)
+        if self.reward_fn is not None and paid.any():
+            rewards[paid] = np.asarray(self.reward_fn(out), np.float32)[paid]
         return self._observations(), rewards, terminated, truncated, out
 
     def close_extras(self, **kwargs):
@@ -197,9 +223,7 @@ class HorizonEnv(gym.Env):
         return self._observation(), dict(infos[0], active=True)
 
     def step(self, action):
-        yaw = self._state[self.state_fields["self_yaw"]]
-        pitch = self._state[self.state_fields["self_pitch"]]
-        buttons, hotbar, yaw, pitch = self.codec.encode(action, yaw, pitch)
+        buttons, hotbar, yaw, pitch = _encode(self.codec, action, self._state[None], self.state_fields)
         states, infos, terminated, truncated, active = self.fleet.step(
             [(int(buttons[0]), int(hotbar[0]), float(yaw[0]), float(pitch[0]))])
         info = dict(infos[0], active=bool(active[0]))

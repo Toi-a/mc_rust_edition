@@ -54,7 +54,7 @@ class FakeFleet:
         self.t += 1
         n = len(self.slots)
         what = self.script.pop(0) if self.script else ["play"] * n
-        states = np.zeros((n, 5), np.float32)
+        states = np.zeros((n, self.state_len), np.float32)
         infos, term, trunc, active = [{} for _ in range(n)], np.zeros(n, bool), np.zeros(n, bool), np.zeros(n, bool)
         for i, w in enumerate(what):
             if w == "away":
@@ -62,7 +62,8 @@ class FakeFleet:
                 continue
             active[i] = True
             if w != "start":
-                self.look[i] = actions[i][2:]
+                look = np.array(actions[i][2:], np.float32)
+                self.look[i] = np.where(np.isnan(look), self.look[i], look)  # NaN keeps the angle
             states[i] = self._state(i)
             if w == "crash":
                 trunc[i] = True
@@ -81,6 +82,14 @@ class FakeFleet:
 
     def close(self):
         self.closed = True
+
+
+def with_opponent(fleet):
+    """Adds the opponent's fields to the fake's states: slot 0 has one, 40 right and 20 up."""
+    fleet.state_len = 8
+    fleet.state_fields = dict(FIELDS, target_present=slice(5, 6), target_bearing=slice(6, 8))
+    fleet._state = lambda i: np.array([fleet.t] * 3 + [*fleet.look[i], i == 0, 40.0, -20.0], np.float32)
+    return fleet
 
 
 def act(env, **parts):
@@ -146,7 +155,62 @@ class CodecTest(unittest.TestCase):
                          ([1, 0, 0, 0, 0, 0, 0, 1, 0], [-90.0, 90.0]))
 
 
+    def test_a_policy_gets_only_the_parts_it_is_given(self):
+        codec = ActionCodec(2, camera="aim", buttons=("forward", "back", "jump", "attack"), hotbar=False)
+        self.assertEqual(sorted(codec.space.spaces), ["buttons"])
+        self.assertEqual(codec.space["buttons"].n, 4)
+        bits, hotbar, _, _ = codec.encode({"buttons": [[1, 0, 1, 0], [0, 1, 0, 1]]}, [0.0, 0.0], [0.0, 0.0])
+        self.assertEqual((bits.tolist(), hotbar.tolist()), ([1 | 16, 2 | 128], [0, 0]))
+        with self.assertRaisesRegex(ValueError, "buttons"):
+            ActionCodec(1, buttons=("forward", "fly"))
+
+    def test_aim_assist_faces_the_opponent_within_the_turn_cap(self):
+        codec = ActionCodec(3, camera="aim", buttons=("attack",), hotbar=False)
+        # The opponent is 30 right and 10 up; 150 left (over the 90 a tick allows); absent.
+        _, _, yaw, pitch = codec.encode({"buttons": np.zeros((3, 1))}, yaw=[100.0, 100.0, 100.0],
+                                        pitch=[5.0, 5.0, 5.0], aim=[[30.0, -10.0], [-150.0, 60.0], [0.0, 0.0]])
+        self.assertEqual(yaw.tolist(), [130.0, 10.0, 100.0])
+        self.assertEqual(pitch.tolist(), [-5.0, 65.0, 5.0], "any pitch in one tick")
+
+    def test_by_default_a_tick_turns_90_degrees_of_yaw_and_any_pitch(self):
+        absolute = ActionCodec(1)
+        _, _, yaw, pitch = absolute.encode({"buttons": np.zeros((1, 9)), "hotbar": [0], "look": [[-170.0, 90.0]]},
+                                           yaw=[0.0], pitch=[-90.0])
+        self.assertEqual((yaw[0], pitch[0]), (-90.0, 90.0))
+        delta = ActionCodec(1, camera="delta")
+        self.assertEqual(delta.space["look"].high.tolist(), [90.0, 180.0])
+        free = ActionCodec(1, max_turn=0)
+        _, _, yaw, _ = free.encode({"buttons": np.zeros((1, 9)), "hotbar": [0], "look": [[-170.0, 0.0]]}, [0.0], [0.0])
+        self.assertEqual(yaw[0], -170.0)
+
+    def test_flat_actions_are_one_array(self):
+        discrete = ActionCodec(2, camera="bins", buttons=("forward", "attack"), bins=(-10.0, 0.0, 10.0), flat=True)
+        self.assertEqual(discrete.space.nvec.tolist(), [2, 2, 10, 3, 3])
+        bits, hotbar, yaw, pitch = discrete.encode(np.array([[1, 1, 4, 2, 1], [0, 1, 0, 0, 0]]), [0.0, 0.0], [0.0, 0.0])
+        self.assertEqual((bits.tolist(), hotbar.tolist(), yaw.tolist(), pitch.tolist()),
+                         ([1 | 128, 128], [4, 0], [10.0, -10.0], [0.0, -10.0]))
+        aimed = ActionCodec(1, camera="aim", buttons=("forward", "back", "jump", "attack"), hotbar=False, flat=True)
+        self.assertEqual(aimed.space.nvec.tolist(), [2, 2, 2, 2])
+        continuous = ActionCodec(1, camera="delta", buttons=("forward", "attack"), hotbar=False, flat=True)
+        self.assertEqual(continuous.space.shape, (4,))
+        bits, _, yaw, pitch = continuous.encode(np.array([0.3, -0.2, 0.5, -0.25], np.float32), [10.0], [0.0])
+        self.assertEqual((bits.tolist(), yaw.tolist(), pitch.tolist()), ([1], [55.0], [-45.0]),
+                         "above 0 holds a key; the look spans the turn a tick allows")
+        with self.assertRaisesRegex(ValueError, "hotbar"):
+            ActionCodec(1, camera="delta", flat=True)
+        for codec in (discrete, aimed, continuous, ActionCodec(1)):
+            self.assertTrue(codec.space.contains(codec.placeholder()))
+
+
 class VecEnvTest(unittest.TestCase):
+    def test_aim_assist_reads_the_bearing_of_the_observation(self):
+        fleet = with_opponent(FakeFleet(2))
+        env = HorizonVecEnv(fleet=fleet, camera="aim", buttons=("forward", "attack"), hotbar=False, flat=True)
+        env.reset()
+        env.step(np.array([[1, 1], [1, 0]]))
+        self.assertEqual(fleet.sent[-1], [(1 | 128, 0, 40.0, -20.0), (1, 0, 0.0, 0.0)],
+                         "the one with an opponent turns to it; the other keeps its view")
+
     def test_spaces_follow_the_observation_mode(self):
         for obs, shape in (("state", (3, 5)), ("image", (3, 4, 8))):
             env = HorizonVecEnv(fleet=FakeFleet(3, obs))
@@ -214,6 +278,20 @@ class VecEnvTest(unittest.TestCase):
         self.assertEqual(obs[:, 3:].tolist(), [[20.0, -10.0], [-60.0, 0.0]])
         self.assertEqual(fleet.sent[-1][0], (0, 0, 20.0, -10.0))
 
+    def test_a_release_lets_go_of_the_keys_and_keeps_what_ended(self):
+        fleet = FakeFleet(2, script=[["play", "play"], ["die", "play"], ["away", "play"]])
+        env = HorizonVecEnv(fleet=fleet)
+        env.reset()
+        held = act(env, buttons=np.ones((2, 9), np.int8))
+        env.step(held)
+        env.release()
+        buttons, hotbar, yaw, pitch = fleet.sent[-1][0]
+        self.assertEqual((buttons, hotbar, np.isnan(yaw), np.isnan(pitch)), (0, 0, True, True))
+        _, _, term, _, infos = env.step(held)
+        self.assertEqual((term.tolist(), infos["valid"].tolist()), ([True, False], [False, True]),
+                         "the death during the release is reported, as no transition")
+        self.assertFalse(env.step(held)[2].any())
+
     def test_closing_closes_the_fleet(self):
         fleet = FakeFleet(1)
         env = HorizonVecEnv(fleet=fleet)
@@ -255,11 +333,51 @@ class ParallelEnvTest(unittest.TestCase):
         self.assertEqual((term, env.agents), ({"Agent_0": True, "Agent_1": False}, ["Agent_1"]))
         obs, rewards, term, trunc, infos = env.step({"Agent_1": actions["Agent_1"]})
         self.assertEqual(sorted(obs), ["Agent_1"])
-        # Agent_0 sent nothing: the fleet got "hold nothing, keep looking where you look" for it.
-        self.assertEqual(fleet.sent[-1][0], (0, 0, *fleet.look[0].tolist()))
         obs, rewards, term, trunc, infos = env.step({"Agent_1": actions["Agent_1"]})
         self.assertEqual((env.agents, infos["Agent_0"]["episode_start"]), (["Agent_0", "Agent_1"], True))
         self.assertNotIn("reset_reason", infos["Agent_0"])
+
+
+try:
+    from horizon_rl.sb3 import HorizonSB3VecEnv
+except ImportError:
+    HorizonSB3VecEnv = None
+
+
+@unittest.skipIf(HorizonSB3VecEnv is None, "stable-baselines3 isn't installed")
+class SB3Test(unittest.TestCase):
+    def make(self, obs="both", **kw):
+        fleet = with_opponent(FakeFleet(2, obs, **kw))
+        return HorizonSB3VecEnv(HorizonVecEnv(fleet=fleet, camera="aim", hotbar=False, flat=True,
+                                              buttons=("forward", "back", "jump", "attack"),
+                                              reward=lambda info: info["target_damage"])), fleet
+
+    def test_it_speaks_sb3s_vec_env(self):
+        env, fleet = self.make(script=[["die", "play"], ["away", "crash"]], signals={(2, 1): {"target_damage": 3.0}})
+        obs = env.reset()
+        self.assertEqual((obs["image"].shape, env.observation_space["image"].shape), ((2, 1, 4, 8), (1, 4, 8)))
+        obs, rewards, dones, infos = env.step(np.array([[1, 0, 0, 1], [0, 0, 0, 0]]))
+        self.assertEqual((rewards.tolist(), dones.tolist(), fleet.sent[-1][0][0]), ([0.0, 3.0], [True, False], 1 | 128))
+        self.assertEqual((infos[0]["TimeLimit.truncated"], infos[0]["terminal_observation"]["state"].shape), (False, (8,)))
+        self.assertNotIn("terminal_observation", infos[1])
+        obs, rewards, dones, infos = env.step(np.zeros((2, 4), int))
+        self.assertEqual((dones.tolist(), infos[0]["valid"], infos[1]["TimeLimit.truncated"], infos[1]["reset_reason"]),
+                         ([False, True], False, True, "crash (exit 1)"))
+
+    def test_a_dict_action_space_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "flat=True"):
+            HorizonSB3VecEnv(HorizonVecEnv(fleet=FakeFleet(1)))
+
+    def test_ppo_trains_on_it(self):
+        from stable_baselines3 import PPO
+        from stable_baselines3.common.vec_env import VecMonitor
+        env, fleet = self.make(obs="state")
+        from horizon_rl.sb3 import ReleaseKeys
+        PPO("MlpPolicy", VecMonitor(env), n_steps=8, batch_size=8, n_epochs=1, device="cpu").learn(
+            32, callback=ReleaseKeys())
+        released = [a for a in fleet.sent if np.isnan(a[0][2])]
+        self.assertEqual((len(fleet.sent) - len(released), len(released)), (16, 2),
+                         "two rollouts of 8 steps, the keys released after each")
 
 
 if __name__ == "__main__":

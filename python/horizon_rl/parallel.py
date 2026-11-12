@@ -24,11 +24,7 @@ class HorizonParallelEnv(ParallelEnv):
         self.vec = vec_env if vec_env is not None else HorizonVecEnv(config, **settings)
         self.possible_agents = list(self.vec.names)
         self.agents = []
-        self._noop = {"buttons": np.zeros(self.vec.single_action_space["buttons"].n, np.int8),
-                      "hotbar": 0,
-                      "look": np.zeros(2, self.vec.single_action_space["look"].dtype)}
-        if self.vec.codec.camera == "bins":
-            self._noop["look"][:] = int(np.argmin(np.abs(self.vec.codec.bins)))  # the smallest turn
+        self._noop = self.vec.codec.placeholder()  # for agents between episodes: it is ignored
 
     def observation_space(self, agent):
         return self.vec.single_observation_space
@@ -52,7 +48,10 @@ class HorizonParallelEnv(ParallelEnv):
     def step(self, actions):
         """`actions`: name -> action, for the agents in `agents` (others' are ignored)."""
         rows = [actions.get(a, self._noop) for a in self.possible_agents]
-        batch = {k: np.stack([np.asarray(r[k]) for r in rows]) for k in self._noop}
+        if self.vec.codec.flat:
+            batch = np.stack([np.asarray(r) for r in rows])
+        else:
+            batch = {k: np.stack([np.asarray(r[k]) for r in rows]) for k in self._noop}
         obs, rewards, terminated, truncated, infos = self.vec.step(batch)
         out = ({}, {}, {}, {}, {})
         agents = []
