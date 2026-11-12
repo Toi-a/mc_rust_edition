@@ -85,9 +85,10 @@ def main():
             for _ in range(5):
                 state, info = env.step(0, yaw=yaw + 180.0, pitch=0.0)
             away = sky_band(env.frame())
-            # The sky band is plain sky, bright and even, unless the opponent stands in it.
-            check(away.mean() > 120 and away.std() < 12,
-                  f"facing away, the band above the horizon is plain sky ({away.mean():.0f} ± {away.std():.0f})")
+            # The sky band is plain sky, bright all over, unless the opponent stands in it. (Not
+            # "even": the sun is in it when the agent happens to face that way.)
+            check(away.mean() > 120 and away.min() > 140,
+                  f"facing away, the band above the horizon is plain sky ({away.mean():.0f}, darkest {away.min():.0f})")
             check(away.mean() - facing.mean() > 20,
                   f"facing the opponent, it darkens that band ({facing.mean():.0f} vs {away.mean():.0f})")
 

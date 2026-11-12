@@ -2,8 +2,8 @@
 
 Status: **reviewed** (2026-11-10). M1 (one client from Python), M2 (a supervised fleet,
 [measured](#m2-measurements)) and M3 (grayscale image observations, [measured](#m3-measurements))
-are built, and process model B as an option ([measured](#model-b-measurements)); the Gymnasium env (M4)
-and removal (M5) are next.
+are built, process model B as an option ([measured](#model-b-measurements)), and the Gymnasium
+envs (M4, [measured](#m4-measurements)); removal (M5) is next.
 
 Goal: many headless 26.3 clients, each an offline-mode player on a remote (Paper) server, driven
 from Python through a Gymnasium env for PvP self-play. Per-instance CPU and RAM are the main costs.
@@ -268,11 +268,25 @@ or the `horizon-rl` command.
 - `HorizonClient`: one instance (socket, shm, numpy views), blocking.
 - `Fleet` / `FleetConfig` (M2): N instances, stepped together without threads (one `selectors`
   loop), supervised; `horizon-rl` runs one from the command line or a TOML file.
-- `HorizonEnv(gymnasium.Env)`: one agent.
-- `HorizonVecEnv(gymnasium.vector.VectorEnv)`: sends all actions, then waits for all
-  observations. Instances run in parallel in real time, so this costs no extra threads.
-- `HorizonParallelEnv` (PettingZoo `ParallelEnv`): an optional wrapper. The server does the
-  matchmaking, so agents don't interact through the env.
+- `HorizonEnv(gymnasium.Env)`: one agent (a fleet of one, so it is supervised too).
+- `HorizonVecEnv(gymnasium.vector.VectorEnv)` (M4, `env.py`): sends all actions, then waits for
+  all observations. Instances run in parallel in real time, so this costs no extra threads.
+  - Spaces: the observation space comes from the `WELCOME` layout and `obs`; the action space
+    from `actions.py`'s `ActionCodec`: buttons `MultiBinary(9)`, hotbar `Discrete(10)`, and the
+    camera as absolute angles, deltas (continuous) or bins (discrete), chosen by `camera=`. Deltas
+    and bins are added in Python to the last observed yaw and pitch; the wire stays absolute.
+    They are a setting of the env, not Gymnasium wrappers: the turn needs the env's last
+    observation, and one codec serves the single, vector and PettingZoo envs.
+  - Human caps (`max_turn`, `max_cps`; off by default) are applied in the same codec.
+  - **Autoreset**: Gymnasium's next-step mode, stretched over the reset's real duration. The
+    fleet's `active` mask and `episode_start` go into `infos`, with `valid = active and not
+    episode_start`: the rows that are real transitions. An inactive agent's row repeats its last
+    observation (so it stays inside the space) with reward 0. A strict next-step autoreset would
+    block every agent while one respawns or restarts, and the others' ticks would run without
+    actions.
+  - Rewards: none built in (0); `reward=` takes a function of the infos (`rewards.duel`).
+- `HorizonParallelEnv` (PettingZoo `ParallelEnv`, `parallel.py`): an optional wrapper over the
+  vector env. The server does the matchmaking, so agents don't interact through the env.
 - `examples/random_agent.py` and `bench/throughput.py` (steps/s per instance and in total, CPU %
   and RSS per instance as N grows, max N that holds 20 Hz).
 
@@ -449,3 +463,39 @@ What this says:
 - The numbers in this table and the M2/M3 tables come from different power settings (M2/M3 used
   `powersave`), so compare CPU % within this table only. State-only N = 16 here, 1.00 %, is close
   to M2's 1.07 % (whose clocks a stray server kept high).
+
+## M4 measurements
+
+Measured 2026-11-12 on the same desktop (`performance` power profile), through the Gymnasium
+vector env: `python/bench/throughput.py --ns … --seconds 30` (10 s of settling first), agents in
+pairs on a fresh local server (normal world, seed 1234), frame skip 1. The policy is the scripted
+fighter played through the Gymnasium action space, except the last row (random samples of the
+action space). Per-client CPU, RSS and PSS are a process's divided by K. "Python" is the trainer's
+side: the env, the supervisor and the scripted policy, with no inference.
+
+| N | obs | K | steps/s per instance | transitions/s in total | client CPU % | RSS MB | PSS MB | GPU MB | Python CPU % | Python ms per vector step | late ticks per 1000 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2 | state | 1 | 20.06 | 37.9 | 0.80 | 392 | 357 | – | 0.8 | 0.38 | 0 |
+| 8 | state | 1 | 20.01 | 147.6 | 0.92 | 393 | 347 | – | 1.8 | 0.90 | 0 |
+| 16 | state | 1 | 20.00 | 293.9 | 1.08 | 394 | 345 | – | 3.3 | 1.64 | 0 |
+| 32 | state | 1 | 20.00 | 588.4 | 1.25 | 383 | 332 | – | 7.1 | 3.53 | 0 |
+| 32 | state | 8 | 20.00 | 585.8 | 1.13 | 157 | 152 | – | 6.4 | 3.22 | 0 |
+| 64 | state | 8 | 20.00 | 1174.3 | 1.60 | 159 | 154 | – | 15.6 | 7.81 | 0 |
+| 32 | image 64x64 | 8 | 20.00 | 589.4 | 2.98 | 231 | 177 | 168 | 7.3 | 3.63 | 0 |
+| 16 | both 64x64 (random policy) | 1 | 20.00 | 320.0 | 3.05 | 549 | 390 | 181 | 3.5 | 1.74 | 0 |
+
+No slot was truncated or restarted in any row.
+
+What this says:
+
+- **The Gymnasium layer costs nothing that shows**: every row holds 20 steps per second per
+  instance with no late ticks, and the clients' CPU and memory are the fleet's own (M2, M3 and
+  model B tables).
+- **The largest N measured that holds 20 Hz is 64** (state, K = 8): 1 174 transitions per second,
+  ~10 GB of RAM, one core for all the clients together. Without model B, 32 was measured (12.5 GB);
+  N = 40 held in M2. More than 64 wasn't tried.
+- **Transitions are a little under N x 20** in the fighting rows: an agent that died gives none for
+  the second its respawn takes (`valid` False). With the random policy nobody dies: exactly 320.
+- **Python's share grows linearly**: ~0.11 ms per agent per step (about half is the scripted
+  policy, which a trainer replaces by one batched inference). At N = 64 that is 7.8 ms of the 50 ms
+  tick, leaving ~40 ms for inference before ticks would run late.

@@ -3,10 +3,11 @@
 Headless 26.3 clients that Python drives, for PvP self-play. The design, and why it is built this
 way: [design.md](design.md).
 
-Status: **M3**: N headless clients from one command or config, each in its own process,
+Status: **M4**: N headless clients from one command or config, each in its own process,
 supervised (reconnects, restarts, hang detection), stepped together at 20 Hz from Python, with
 the fair-play state vector and, optionally, grayscale frames of each player's view; optionally
-several clients per process (model B). The Gymnasium env (M4) comes next.
+several clients per process (model B); and [Gymnasium environments](#gymnasium) over them.
+Removing what this fork doesn't need (M5) comes next.
 
 ## Set up
 
@@ -93,7 +94,7 @@ below), `stagger` (seconds between starts, 0.25), `hang_timeout` (5 s). It print
 episodes and restarts every 10 s. Each client's files and log are under `--root` (default a new
 temp folder) in `NAME/`.
 
-From Python (what training uses until the Gymnasium env of M4):
+From Python, without Gymnasium (the layer the [Gymnasium envs](#gymnasium) are built on):
 
 ```python
 from horizon_rl.fleet import Fleet, FleetConfig
@@ -130,6 +131,66 @@ one restarts the K together (each a truncated episode; the others' `reset_reason
 `(shard)`). A kick still stays one client's own. Every slot keeps its own socket, shared memory and
 folder (`NAME/`); the process's log is in its first slot's folder.
 
+## Gymnasium
+
+```python
+from horizon_rl import HorizonVecEnv, rewards
+
+env = HorizonVecEnv(server="HOST:PORT", n=8, pairs=True, obs="both", camera="delta",
+                    reward=rewards.duel)           # starts the 8 clients
+obs, infos = env.reset()                           # all alive in the world
+while training:
+    actions = policy(obs)                          # or env.action_space.sample()
+    obs, rewards_, terminated, truncated, infos = env.step(actions)
+    valid = infos["valid"]                         # train on these rows only (below)
+env.close()
+```
+
+`python/examples/random_agent.py --local -n 4` runs this loop with random actions on a local
+stand-in server (`--server HOST:PORT` for a real one).
+
+- **`HorizonVecEnv`** (`gymnasium.vector.VectorEnv`): every `FleetConfig` setting as a keyword
+  (or `HorizonVecEnv(FleetConfig(...))`, or a TOML file through `FleetConfig.load`), so `obs`,
+  `image_size`, `frame_skip`, `clients_per_process` and the rest work as for a fleet. One `step`
+  sends all actions and waits for all observations: one game tick with frame skip 1, so 20 steps
+  per second for every agent, in one Python thread.
+- **`HorizonEnv`** (`gymnasium.Env`): one agent (`HorizonEnv(server=..., names="Agent",
+  target="Rival")`). After `terminated` or `truncated`, `reset()` waits until the agent is alive
+  in the world again (respawned, rejoined or restarted).
+- **Observation space**, by `obs`: `"state"`: `Box(-inf, inf, (L,), float32)`, the fair-play
+  vector (`env.state_fields`: name -> slice; `env.items`: the item registry its item indices
+  refer to); `"image"`: `Box(0, 255, (H, W), uint8)`; `"both"`: a `Dict` with `state` and `image`.
+- **Action space**: `Dict(buttons=MultiBinary(9), hotbar=Discrete(10), look=...)`. `buttons` in
+  the order of `horizon_rl.actions.BUTTON_NAMES` (forward, back, left, right, jump, sprint, sneak,
+  attack, use): held while 1, except `attack`, one click per step. `hotbar`: 0 keeps the slot,
+  1..9 select. `look` depends on `camera=`:
+  - `"absolute"` (default): `Box([-180, -90], [180, 90])`, the yaw and pitch to face;
+  - `"delta"`: `Box(-delta_max, delta_max, (2,))`, a turn in degrees per step (`delta_max=30`);
+  - `"bins"`: `MultiDiscrete([B, B])`, indices into `bins=` (turns in degrees; default
+    -45, -15, -5, -1.5, 0, 1.5, 5, 15, 45).
+
+  Turns are added to the yaw and pitch of the last observation, in Python; the game still gets
+  absolute angles.
+- **Human caps**, off by default: `max_turn=` (degrees, the largest turn per step on each axis;
+  an absolute target further away is approached by the short way) and `max_cps=` (attack clicks
+  per second; a click over the rate is dropped, the other keys of that action stay).
+- **Reward**: 0 unless `reward=` is given: a function of the step's `infos` returning the
+  rewards. `horizon_rl.rewards.duel` is damage dealt minus damage taken, as the client sees them.
+  Every signal is in `infos` ([design.md](design.md#rewards-episodes-and-info)), each as an
+  `(n,)` array with Gymnasium's `_key` mask of the agents that have it.
+- **Episodes** (vector env): Gymnasium's next-step autoreset (`metadata["autoreset_mode"]`),
+  stretched, because a reset takes game time and the other agents can't wait for it. The step
+  that ends agent `i`'s episode has `terminated[i]` (it died) or `truncated[i]` (a fault:
+  `infos["reset_reason"][i]`). Then, for the steps its reset takes (a respawn: about a second;
+  a restart: several), `infos["active"][i]` is False: its action is ignored, its observation is
+  its last one and its reward 0. The step that returns its new episode's first observation has
+  `infos["episode_start"][i]`. **`infos["valid"][i]`** is True exactly when row `i` is a real
+  transition (the agent acted on its previous observation and this is what followed): put only
+  those rows in a replay buffer or rollout, and cut the trajectory at `episode_start`.
+- **PettingZoo** (optional, `pip install pettingzoo`): `horizon_rl.parallel.HorizonParallelEnv`
+  is a `ParallelEnv` over the same vector env, with the players' names as agents. An agent whose
+  episode ended leaves `agents` and comes back by itself when its next one starts.
+
 ## Server
 
 The client speaks only Minecraft 26.3 (protocol 777). On Paper: a 26.3 build, or ViaVersion (plus
@@ -147,7 +208,9 @@ python/.venv/bin/python python/tests/e2e_duel.py         # M1 end to end: 2 clie
 python/.venv/bin/python python/tests/e2e_fleet.py        # M2: 4 fighting clients; kill, kick, hang, death
 python/.venv/bin/python python/tests/e2e_image.py        # M3: frames: sky/ground, the opponent, frame skip, HUD
 python/.venv/bin/python python/tests/e2e_shard.py        # model B: 4 image clients in 2 processes; kick, kill
-python/.venv/bin/python python/bench/fleet.py --ns 2,8,16,32   # CPU, RSS, 20 Hz as N grows (--infer-ms 10)
+python/.venv/bin/python python/tests/e2e_gym.py          # M4: the Gymnasium envs on 4 + 1 real clients
+python/.venv/bin/python python/bench/throughput.py --ns 2,8,16,32   # the Gymnasium env: steps/s, CPU, RSS as N grows
+python/.venv/bin/python python/bench/fleet.py --ns 2,8,16,32   # the fleet below it (--infer-ms 10)
 python/.venv/bin/python python/bench/fleet.py --ns 8,32 --obs image --image 64x64   # the same with frames (+ GPU memory)
 python/.venv/bin/python python/bench/fleet.py --ns 32 --obs image --per-process 8      # model B: 8 clients per process
 python/.venv/bin/python python/bench/transport.py        # binary socket vs the JSON control socket

@@ -1,5 +1,9 @@
 """Python side of Horizon's RL environment (docs/rl/design.md)."""
+from . import proto, rewards
+from .actions import ActionCodec
 from .client import Disconnected, HorizonClient
-from . import proto
+from .env import HorizonEnv, HorizonVecEnv
+from .fleet import Fleet, FleetConfig
 
-__all__ = ["HorizonClient", "Disconnected", "proto"]
+__all__ = ["HorizonEnv", "HorizonVecEnv", "ActionCodec", "Fleet", "FleetConfig", "HorizonClient",
+           "Disconnected", "proto", "rewards"]
