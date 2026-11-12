@@ -77,6 +77,11 @@ with HorizonClient("/tmp/agent1.sock") as env:
   dozen clients on, new ones can't open the GPU.
 - `HORIZON_SUBMIT_THREAD=0` (the fleet sets it) saves a thread: each frame is read back at once
   anyway.
+- `HORIZON_SECTION_ARENA_VERTICES` (the fleet sets 262144) sizes the terrain buffer's first page
+  for a small view: ~7.5 MB of GPU memory instead of ~30 MB; it grows when needed.
+- With several clients per process (`--per-process K`), they share the first client's read-only
+  textures (entity/item atlas, block textures): an image client then takes ~42 MB of GPU memory
+  instead of ~170 MB ([design](design.md#m5-measurements)).
 
 ## Run a fleet
 

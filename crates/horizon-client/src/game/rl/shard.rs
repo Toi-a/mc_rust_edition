@@ -154,6 +154,9 @@ impl Game<'_> {
         let gui = UiResources::load(&options.resources, vanilla_root)?;
         let renderer = match self.renderer.is_some() {
             true => {
+                // Built from the same packs as the first client's: its read-only textures
+                // serve this one too (gfx/share.rs).
+                let _siblings = horizon_client::gfx::share::Siblings::hold();
                 let mut r =
                     self.renderer_for(None::<Arc<winit::window::Window>>, &self.pack, &gui)?;
                 let [w, h] = options.window_size;

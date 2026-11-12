@@ -131,6 +131,14 @@ impl Arena {
     /// Vertices; `storage` also lets shaders read them as a storage buffer (a shader pack's
     /// terrain program reads the other corners of a vertex's quad for its normal).
     pub fn new(device: &wgpu::Device, stride: u64, capacity: u64, storage: bool) -> Self {
+        // The first page's size, in vertices: `HORIZON_SECTION_ARENA_VERTICES` for a client that
+        // draws only a few chunks (an RL client's 64x64 view at render distance 2 uses ~5 MB of
+        // the default ~30 MB). Pages still grow on demand.
+        let capacity = std::env::var("HORIZON_SECTION_ARENA_VERTICES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(capacity);
         let usage = if storage {
             wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE
         } else {

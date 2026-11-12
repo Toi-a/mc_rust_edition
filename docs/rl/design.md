@@ -327,8 +327,16 @@ repo's own dedicated server (`horizon-client --dedicated`, offline mode) stands 
 ## Removal plan (M5, step by step, each step builds and passes tests)
 
 1. **No deletions yet.** Build with `--no-default-features` plus a new `rl` feature. That drops
-   audio, controllers, Discord, friends and heartbeat. Measure.
-2. Delete the `launcher/` workspace and the Horizon-layer crates the RL build doesn't link:
+   audio, controllers, Discord, friends and heartbeat. Measure. Done 2026-11-12: no measurable
+   change (headless already ran none of them), so there is no `rl` feature
+   ([M5 measurements](#m5-measurements)).
+2. Done 2026-11-12 for everything the game doesn't link: the launcher and `horizon-port-pack`, the
+   telemetry ingest server and the mod registry service, `horizon-official`/`horizon-game`/
+   `horizon-heartbeat`, `cargo-horizon-mod` and `horizon-mod-deps`; then (step 3) Play with Friends
+   and `horizon-relay`. Still linked, so they need code changes: telemetry, cosmetics, bench, the
+   content-mod loader (`horizon-mods`), Discord. `horizon-bots` stays: the dedicated server's e2e
+   tools drive it. The plan as written:
+   Delete the `launcher/` workspace and the Horizon-layer crates the RL build doesn't link:
    telemetry and its server, cosmetics, friends and relay, heartbeat, the mod registry, port-pack,
    bench. Then CI workflows and docs that only cover them. Decided (2026-11-10): these go, one crate
    group per commit, each building and passing tests.
@@ -526,3 +534,50 @@ What this says:
 - **Python's share grows linearly**: ~0.11 ms per agent per step (about half is the scripted
   policy, which a trainer replaces by one batched inference). At N = 64 that is 7.8 ms of the 50 ms
   tick, leaving ~40 ms for inference before ticks would run late.
+
+## M5 measurements
+
+Measured 2026-11-12/13 on the same desktop (`performance` power profile), `python/bench/throughput.py`
+(30 s after 10 s of settling, pairs fighting, frame skip 1).
+
+**Step 1, `--no-default-features`** (no audio, controllers, Discord, friends), against the M4 /
+model B rows of the default build:
+
+| N | obs | K | client CPU % | RSS MB | PSS MB | GPU MB | steps/s | late ticks |
+|---|---|---|---|---|---|---|---|---|
+| 16 | state | 1 | 1.13 (default 1.08) | 393 (394) | 345 (345) | – | 20.0 | 0 |
+| 32 | state | 8 | 1.22 (1.13) | 157 (157) | 152 (152) | – | 20.0 | 0 |
+| 16 | image 64x64 | 1 | 2.84 (2.57) | 578 (550) | 395 (390) | 181 (182) | 20.0 | 0 |
+
+No difference beyond noise: a headless client never started audio or a controller backend, and
+Discord and friends do nothing until used. So the RL build stays the default build and there is no
+`rl` feature; deleting code (steps 2 and 3) is for the repository's size and build time, not speed.
+
+**Step 4, GPU memory of an image client.** `horizon-ctl memory` (the GPU allocator's report by
+label) on a 64x64 image client: 170 MB allocated, of which the **shared atlas** (entities, items,
+GUI; one 2D texture) is 96 MB, the **block sprites** (texture arrays with mipmaps) 30.5 MB and the
+**terrain arena** 30.3 MB, pre-sized at 1 M vertices while render distance 2 fills 4.7 MB of it.
+Everything else is under 13 MB. Two changes:
+
+- Model B's clients reuse the first renderer's shared atlas and block sprites (`gfx/share.rs`, held
+  by `shard.rs` while it makes a sibling's renderer; a pack reload still builds its own). The atlas
+  is never written after it is made; the block sprites' animated layers (water, lava, fire) are
+  written by every sibling with its own tick, so such a frame may be another client's tick.
+- `HORIZON_SECTION_ARENA_VERTICES` sets the terrain arena's first page (it grows on demand); the
+  fleet sets 2^18 vertices (~7.5 MB) for image clients.
+
+| N | obs | K | client CPU % | RSS MB | PSS MB | GPU MB | frame ms | steps/s | late ticks |
+|---|---|---|---|---|---|---|---|---|---|
+| 16 | image 64x64 | 1 | 2.94 | 546 | 389 | 157 (was 182) | – | 20.0 | 0 |
+| 16 | image 64x64 | 8 | 2.59 | 169 (was 227) | 145 (was 175) | 44 (was 168) | – | 20.0 | 0 |
+| 32 | image 64x64 | 8 | 3.41 | 172 (was 233) | 146 (was 183) | 42 (was 168) | – | 20.0 | 0 |
+
+What this says:
+
+- **GPU memory per image client at K = 8 falls to a quarter**, 168 → 42 MB, and RAM falls too
+  (PSS 175 → 145 MB; the driver keeps host-side state per texture). On this 8 GB card that moves the
+  GPU cap from ~45 image clients to ~180; RAM (~145 MB PSS each) is again the limit, at ~140.
+- At K = 1 only the arena change applies: 182 → 157 MB.
+- Frames of sibling clients were checked by eye (4 clients at K = 4, 128x128): terrain, plants
+  and players draw as on the first client.
+

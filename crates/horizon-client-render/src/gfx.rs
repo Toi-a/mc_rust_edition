@@ -197,6 +197,7 @@ mod hdr_icc;
 mod hdr_start;
 mod hdr_stats;
 pub(crate) mod hud_coverage;
+pub mod share;
 pub use hdr::{Calibration as HdrCalibration, Output as HdrOutput};
 mod hold;
 pub use hold::WorldHold;
@@ -2793,23 +2794,6 @@ impl Renderer {
             ),
         ]
     }
-    /// Device memory the backend's allocator holds, by the label of what holds
-    /// it, largest first, with its allocated and reserved totals (Vulkan and
-    /// DirectX 12; none on Metal and OpenGL) (`horizon-ctl memory`).
-    pub fn gpu_memory_by_label(&self) -> Option<(u64, u64, Vec<(String, u64)>)> {
-        let report = self.device.generate_allocator_report()?;
-        let mut by_label: HashMap<String, u64> = HashMap::new();
-        for a in report.allocations {
-            *by_label.entry(a.name).or_default() += a.size;
-        }
-        let mut labels: Vec<_> = by_label.into_iter().collect();
-        labels.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        Some((
-            report.total_allocated_bytes,
-            report.total_reserved_bytes,
-            labels,
-        ))
-    }
     /// Heap bytes of the renderer's per-section bookkeeping (`horizon-ctl memory`):
     /// resident sections, far tiles, block entities and light sources by section.
     pub fn cpu_census(&self) -> [(&'static str, usize); 4] {
@@ -3564,6 +3548,7 @@ impl Renderer {
             ),
         };
         let mut mip_levels = 1;
+        let sibling = share::sibling(previous);
         let gl = adapter.get_info().backend == wgpu::Backend::Gl;
         // Keep every colour layer's companion, split by the same device limit. Native
         // material stages read the first array; terrain packs stitch all of them.
@@ -3608,42 +3593,45 @@ impl Renderer {
                     })
                     .collect()
             });
-        let sprite_textures: Vec<wgpu::Texture> = prepared
-            .sprites
-            .into_iter()
-            .enumerate()
-            .map(|(array, (mut mips, levels))| {
-                let first = array as u32 * split;
-                let used = layers.saturating_sub(first).clamp(1, split);
-                let count = array_layers(used, gl);
-                // The extra layers are empty.
-                mips.resize(mips.len() / used as usize * count as usize, 0);
-                mip_levels = levels;
-                device.create_texture_with_data(
-                    &queue,
-                    &wgpu::TextureDescriptor {
-                        label: Some("Block sprites"),
-                        size: wgpu::Extent3d {
-                            width: sprite_size,
-                            height: sprite_size,
-                            depth_or_array_layers: count,
-                        },
-                        mip_level_count: levels,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+        let sprite_textures: Vec<wgpu::Texture> = share::sprites(sibling, &mut mip_levels)
+            .unwrap_or_else(|| {
+                prepared
+                    .sprites
+                    .into_iter()
+                    .enumerate()
+                    .map(|(array, (mut mips, levels))| {
+                        let first = array as u32 * split;
+                        let used = layers.saturating_sub(first).clamp(1, split);
+                        let count = array_layers(used, gl);
+                        // The extra layers are empty.
+                        mips.resize(mips.len() / used as usize * count as usize, 0);
+                        mip_levels = levels;
+                        device.create_texture_with_data(
+                            &queue,
+                            &wgpu::TextureDescriptor {
+                                label: Some("Block sprites"),
+                                size: wgpu::Extent3d {
+                                    width: sprite_size,
+                                    height: sprite_size,
+                                    depth_or_array_layers: count,
+                                },
+                                mip_level_count: levels,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format: wgpu::TextureFormat::Rgba8Unorm,
+                                usage: wgpu::TextureUsages::TEXTURE_BINDING
                             | wgpu::TextureUsages::COPY_DST
                             // Shader packs' atlas copies them (pack_atlas.rs).
                             | wgpu::TextureUsages::COPY_SRC
                             | wgpu::TextureUsages::STORAGE_BINDING,
-                        view_formats: &[],
-                    },
-                    wgpu::util::TextureDataOrder::LayerMajor,
-                    &mips,
-                )
-            })
-            .collect();
+                                view_formats: &[],
+                            },
+                            wgpu::util::TextureDataOrder::LayerMajor,
+                            &mips,
+                        )
+                    })
+                    .collect()
+            });
         let material_animations = animations
             .iter()
             .filter(|a| a.has_materials())
@@ -3796,28 +3784,30 @@ impl Renderer {
             )
             .into());
         }
-        let atlas = device.create_texture_with_data(
-            &queue,
-            &wgpu::TextureDescriptor {
-                label: Some("Shared atlas"),
-                size: wgpu::Extent3d {
-                    width: atlas_width,
-                    height: atlas_height,
-                    depth_or_array_layers: 1,
+        let atlas = share::atlas(sibling).unwrap_or_else(|| {
+            device.create_texture_with_data(
+                &queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("Shared atlas"),
+                    size: wgpu::Extent3d {
+                        width: atlas_width,
+                        height: atlas_height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    // COPY_SRC: a shader pack's weather copies the rain and snow sprites out.
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
                 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                // COPY_SRC: a shader pack's weather copies the rain and snow sprites out.
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            atlas_pixels,
-        );
+                wgpu::util::TextureDataOrder::LayerMajor,
+                atlas_pixels,
+            )
+        });
         let atlas_view = atlas.create_view(&Default::default());
         // vanilla's `GlintSampler`: enchanted_glint_item as its own texture,
         // repeated per pixel (`clamp: false`), linear without mipmaps
