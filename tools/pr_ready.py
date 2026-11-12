@@ -390,7 +390,8 @@ def plan(args, base, changed, crates_of, libraries, dependencies):
              skip=None if any(p.startswith(("crates/horizon-theme/", "xtask/")) for p in changed)
              else "theme untouched"),
     ]
-    launcher_skip = None if launcher else "launcher untouched"
+    launcher_skip = ("launcher removed (RL fork)" if not (ROOT / "launcher/Cargo.toml").is_file()
+                     else None if launcher else "launcher untouched")
     for name, command in [("launcher rustfmt", "cargo fmt --check"),
                           ("launcher clippy", "cargo clippy --all-targets --locked $features -- -D warnings"),
                           ("launcher tests", "cargo test --locked --lib --bins $features")]:

@@ -378,7 +378,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         result["game"] = {"reference": reference.code, "keys": len(reference.entries), "files": game}
     launcher: list[dict] = []
-    if not args.game_only:
+    # The RL fork removed the launcher: without its default folder there is no launcher to measure.
+    if not args.game_only and (args.launcher_dir.is_dir() or args.launcher_dir != LAUNCHER):
         if not args.launcher_dir.is_dir():
             print(f"{args.launcher_dir}: no such folder", file=sys.stderr)
             return 2
@@ -397,15 +398,17 @@ def main(argv: list[str] | None = None) -> int:
     elif args.unreviewed:
         if reference:
             print_unreviewed("GAME", game, reference.entries)
-        print_unreviewed("LAUNCHER", launcher, None)
+        if launcher:
+            print_unreviewed("LAUNCHER", launcher, None)
     elif args.summary:
         if reference:
             print_game_summary(reference, game)
-        print_launcher_summary(launcher)
+        if launcher:
+            print_launcher_summary(launcher)
     else:
         if reference:
             print_game(reference, args.game_dir, game)
-        if not args.game_only:
+        if launcher:
             if reference:
                 print()
             print_launcher(args.launcher_dir, launcher)

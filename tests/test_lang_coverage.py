@@ -148,7 +148,7 @@ class CommandLineTests(unittest.TestCase):
         code, out, _ = run("--lang", "es_es", "es", "--summary")
         self.assertEqual(code, 0, out)
         self.assertIn("GAME es_es ", out)
-        self.assertIn("LAUNCHER es ", out)
+        self.assertNotIn("LAUNCHER", out)  # the RL fork has no launcher
 
 
 class ReviewTests(unittest.TestCase):

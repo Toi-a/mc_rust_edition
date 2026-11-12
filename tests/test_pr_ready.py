@@ -189,16 +189,6 @@ class PrReadyTests(unittest.TestCase):
                 self.assertEqual(tests.command, "cargo test --locked -p horizon-client -p horizon-client-render "
                                                "-p horizon-mod-api-gen --tests")
 
-    def test_shared_generator_edits_run_launcher_checks(self):
-        with mock.patch.object(pr_ready, "affected_here", return_value=[]):
-            steps = pr_ready.plan(args(quick=True), "origin/main",
-                                  {"crates/horizon-mod-api-gen/src/injection.rs"},
-                                  {**PACKAGES, "horizon-mod-api-gen": "crates/horizon-mod-api-gen"},
-                                  LIBRARIES | {"horizon-mod-api-gen"}, DEPENDENCIES)
-        by_name = {step.name: step for step in steps}
-        for name in ("launcher rustfmt", "launcher clippy", "launcher tests"):
-            self.assertIsNone(by_name[name].skip)
-
     @unittest.skipUnless(shutil.which("cargo"), "needs cargo")
     def test_windows_launcher_checks_include_binary_tests(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -112,7 +112,6 @@ class OwnRunnerTests(unittest.TestCase):
         self.assertIn("vars.SELF_HOSTED_CI == 'all'", value)
         self.assertIn("endsWith(format('{0}', github.event.pull_request.number), '0')", value)
         self.assertNotIn(FORK_GUARD, value)
-        self.assertEqual(value, runs_on(dict(jobs(ci))["launcher"]))
 
     def test_the_light_runners_refuse_forks_themselves(self):
         script = (ROOT / "tools/ci/checks-runners.sh").read_text()
