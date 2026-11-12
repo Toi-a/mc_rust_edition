@@ -118,10 +118,12 @@ RENDER_OPTIONS = {
 
 class ClientProcess:
     """One `horizon-client --headless` joined to `server` as `name`, with an RL socket unless
-    `rl=False`."""
+    `rl=False`. `peers`, `(name, target)` pairs, are more RL clients in the same process
+    (`--rl-client`, process model B: they share its resources and GPU device), each with its own
+    folder, socket and shared memory beside the first one's."""
 
     def __init__(self, server_address, name, root, rl=True, render_distance=2, extra=(),
-                 binary=None, resources=None, env=None, render_options=None):
+                 binary=None, resources=None, env=None, render_options=None, peers=()):
         self.name = name
         self.root = Path(root) / name
         self.game_dir = self.root / "game"
@@ -129,17 +131,33 @@ class ClientProcess:
         options = self.game_dir / "options.txt"
         if render_options and not options.exists():
             options.write_text("".join(f"{k}:{v}\n" for k, v in render_options.items()))
-        self.socket = self.root / "rl.sock" if rl else None
         shm_dir = Path("/dev/shm") if Path("/dev/shm").is_dir() else self.root
-        self.shm = shm_dir / f"horizon-rl-{os.getpid()}-{name}" if rl else None
+        # Each client's socket and shared memory, by name: this one's first.
+        self.sockets, self.shms = {}, {}
+        if rl:
+            self.sockets[name] = self.root / "rl.sock"
+            self.shms[name] = shm_dir / f"horizon-rl-{os.getpid()}-{name}"
         cmd = [str(binary or default_binary()), "--resources", str(resources or default_resources()),
                "--headless", "--game-dir", str(self.game_dir), "--server", server_address,
                "--name", name, "--render-distance", str(render_distance), "--no-pause", *extra]
         if rl:
-            cmd += ["--rl-socket", str(self.socket), "--rl-shm", str(self.shm)]
+            cmd += ["--rl-socket", str(self.sockets[name]), "--rl-shm", str(self.shms[name])]
+        for peer, target in peers:
+            folder = Path(root) / peer
+            folder.mkdir(parents=True, exist_ok=True)
+            self.sockets[peer] = folder / "rl.sock"
+            self.shms[peer] = shm_dir / f"horizon-rl-{os.getpid()}-{peer}"
+            spec = f"name={peer},socket={self.sockets[peer]},shm={self.shms[peer]},dir={folder}"
+            if any("," in str(v) for v in (peer, folder, self.shms[peer])):
+                raise ValueError(f"--rl-client {spec}: no commas in names or paths")
+            if target:
+                spec += f",target={target}"
+            cmd += ["--rl-client", spec]
+        self.socket = self.sockets.get(name)
+        self.shm = self.shms.get(name)
         self.log = self.root / "out.log"
-        if self.socket is not None:
-            self.socket.unlink(missing_ok=True)  # a restart's: wait for the new one
+        for path in self.sockets.values():
+            path.unlink(missing_ok=True)  # a restart's: wait for the new one
         full_env = scratch_env(self.root / "home")
         full_env.update(env or {})
         with self.log.open("a") as log:
@@ -154,9 +172,9 @@ class ClientProcess:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
-        if self.shm is not None:
+        for shm in self.shms.values():
             try:
-                self.shm.unlink()
+                shm.unlink()
             except FileNotFoundError:
                 pass
 

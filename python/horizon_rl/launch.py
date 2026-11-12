@@ -31,6 +31,8 @@ def parse(argv=None):
     p.add_argument("--frame-skip", type=int)
     p.add_argument("--render-distance", type=int)
     p.add_argument("--workers", type=int, help="worker threads per client")
+    p.add_argument("--per-process", type=int,
+                   help="clients per process (model B: shared resources and GPU device)")
     p.add_argument("--stagger", type=float, help="seconds between process starts")
     p.add_argument("--root", help="folder for the clients' files (default: a new temp folder)")
     p.add_argument("--binary", help="horizon-client (default target/fast/horizon-client)")
@@ -51,7 +53,7 @@ def config_of(args):
     overrides = {"server": args.server, "n": args.n, "names": args.names, "target": args.target,
                  "pairs": args.pairs, "obs": args.obs, "frame_skip": args.frame_skip,
                  "image_size": image_size(args.image_size), "hud": args.hud,
-                 "render_distance": args.render_distance, "workers": args.workers,
+                 "render_distance": args.render_distance, "workers": args.workers, "clients_per_process": args.per_process,
                  "stagger": args.stagger, "root": args.root, "binary": args.binary,
                  "resources": args.resources}
     if args.config:

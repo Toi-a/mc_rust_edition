@@ -2,7 +2,8 @@
 
 Status: **reviewed** (2026-11-10). M1 (one client from Python), M2 (a supervised fleet,
 [measured](#m2-measurements)) and M3 (grayscale image observations, [measured](#m3-measurements))
-are built; the Gymnasium env (M4) and removal (M5) are next.
+are built, and process model B as an option ([measured](#model-b-measurements)); the Gymnasium env (M4)
+and removal (M5) are next.
 
 Goal: many headless 26.3 clients, each an offline-mode player on a remote (Paper) server, driven
 from Python through a Gymnasium env for PvP self-play. Per-instance CPU and RAM are the main costs.
@@ -34,10 +35,30 @@ clients, and each one shows up in Python as a reset. Risks: process-wide state a
 There are 26 `thread_local!`/`OnceLock` in `game/`, for example the split `OPTIONS`, the cache dir
 and the narrator. Each one has to be checked.
 
-**Decided:** A, one process per client (M1, M2). It is simple and robust. Then measure RSS per instance and the
-share that `Resources` and the GPU device take. Build B as `--clients K` only if sharing saves a lot
-(I expect it to matter mostly for image mode, because of the device). The supervisor and the Python
-side treat "instance" and "process" separately from the start, so B needs no protocol change.
+**Decided:** A, one process per client (M1, M2), is the default: simple and robust. B is built
+too (after M3), behind a switch: `--rl-client name=N,socket=S[,shm=M][,target=T][,dir=D]`
+(repeatable) adds clients to a headless process, and `FleetConfig.clients_per_process` (K, default
+1) makes the fleet use it ([measured](#model-b-measurements)). No protocol change: each client
+still has its own socket and shm file.
+
+How B is built (`game/rl/shard.rs`):
+
+- The process's own client loads everything as before. The others are `Game`s made the way
+  splitscreen makes its players' (`start_game` over the same `Resources`, leaked for the process's
+  lifetime, and a clone of the packs), each on **its own thread** running the unchanged headless
+  loop. `Game` isn't `Send`, so each is built on its thread; what it is built from is (`Resources`
+  is `Sync`; packs, UI resources, the renderer and audio are `Send`).
+- With images, their renderers are made on the main thread over the first one's device, queue and
+  pipelines (`Renderer::new`'s `previous`, as a resource reload does), then moved to their thread.
+  One device, one driver context; each client keeps its own textures, targets and meshes.
+- Thread-locals are per client for free (one thread each); splitscreen's per-thread
+  `options.txt` path gives each its own (`dir=`). The ~180 statics in the client crates were
+  checked: read-only tables, mod hooks, process-wide settings and counters, the same for every
+  client of one command line.
+- **They live and die together.** When one client's loop ends (an error, a stop signal), the
+  others end theirs and the process exits. The supervisor treats the K slots as one unit: a fault
+  in any (crash, hang, timeout) restarts all K, each a truncated episode (`reset_reason` of the
+  others: the same with " (shard)"). A kick stays one client's own: it rejoins by itself.
 
 ## Transport
 
@@ -287,6 +308,7 @@ harnesses for those, the dedicated server (it's the stand-in).
   the state encoding). No Cargo feature: without `--rl-socket` the hooks are one `None` check. The
   hooks stay out of the big files (`game.rs` only calls `rl_tick`; damage comes through
   `pvp_hurt`, deaths from the alive→dead change, kills from the chat's new death messages).
+- `game/rl/image.rs` (frames, M3) and `game/rl/shard.rs` (process model B).
 - `crates/horizon-rl-proto/`: the wire and shm layout, with no dependencies, so the format is in
   one place and its tests run quickly.
 - `python/horizon_rl/`, `docs/rl/README.md`.
@@ -391,4 +413,39 @@ What this says:
   one run; for absolute numbers use the `performance` governor (or count cycles).
 - **The shard model (B)** would share one GPU device (driver context, block textures, pipelines)
   and the driver's per-process memory among K clients: the 180 MB of GPU memory and ~30 MB PSS
-  per client are what it could save. Not built: asked first (open question).
+  per client are what it could save. Built after M3: [Model B measurements](#model-b-measurements).
+
+## Model B measurements
+
+Measured 2026-11-12 on the same desktop, now on the `performance` power profile (intel_pstate:
+EPP `performance`), `python/bench/fleet.py --per-process K`, 30 s after 10 s of settling, pairs
+fighting, frame skip 1. Per-client CPU, RSS and PSS are each process's divided by K. GPU memory is
+`nvidia-smi`'s total over N.
+
+| N | obs | K | client CPU % | RSS MB | PSS MB | GPU MB | frame ms | fresh frames | steps/s | late ticks | started |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 16 | image 64x64 | 1 | 2.57 | 550 | 390 | 182 | 1.10 | 100 % | 20.01 | 0 | 6.5 s |
+| 16 | image 64x64 | 2 | 2.68 | 364 | 261 | 190 | 1.14 | 100 % | 20.00 | 0 | 4.7 s |
+| 16 | image 64x64 | 4 | 2.50 | 273 | 212 | 175 | 1.01 | 100 % | 20.00 | 0 | 4.1 s |
+| 16 | image 64x64 | 8 | 2.39 | 227 | 175 | 168 | 0.95 | 100 % | 20.00 | 0 | 4.3 s |
+| 32 | image 64x64 | 8 | 2.96 | 233 | 183 | 168 | 1.26 | 100 % | 20.00 | 0 | 5.8 s |
+| 16 | state | 1 | 1.00 | 397 | 347 | 0 | – | – | 20.01 | 0 | 5.7 s |
+| 16 | state | 8 | 0.91 | 156 | 152 | 0 | – | – | 20.00 | 0 | 2.8 s |
+
+What this says:
+
+- **RAM per client more than halves.** PSS drops from 390 to 175 MB per image client at K = 8 and from
+  347 to 152 MB state-only. What is shared is the per-process part: `Resources`, the code, the
+  driver's libraries and context. By RAM, this desktop (23 GB) goes from ~50 to ~100 image clients.
+- **GPU memory barely moves** (182 → 168 MB per client). Sharing the device saves only ~15 MB. The
+  rest belongs to each renderer (its block and entity textures, buffers, targets), so GPU memory
+  still caps image mode at ~45 clients on 8 GB. To go further, renderers on one device would have
+  to share their read-only textures, or headless rendering would need to allocate less: M5
+  profiling work.
+- **CPU is the same or a little lower** (~5–10 %), and 20 Hz holds with every frame fresh and no
+  late ticks.
+- **The cost is isolation**: one fault restarts K clients. With K = 8 that is 8 truncated episodes
+  per crash. The default stays K = 1; use K > 1 when memory is the limit.
+- The numbers in this table and the M2/M3 tables come from different power settings (M2/M3 used
+  `powersave`), so compare CPU % within this table only. State-only N = 16 here, 1.00 %, is close
+  to M2's 1.07 % (whose clocks a stray server kept high).

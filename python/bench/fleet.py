@@ -82,7 +82,7 @@ def mean(xs):
 
 
 def run(n, seconds, settle, workers, render_distance, infer_ms=0.0, obs="state", image=(64, 64),
-        frame_skip=1):
+        frame_skip=1, per_process=1):
     root = Path(tempfile.mkdtemp(prefix=f"horizon-rl-bench-{n}-"))
     # A normal world: the stand-in server spends ~5 cores on a flat one with players (a Horizon
     # dedicated-server issue, not the clients'; docs/rl/design.md#m2-measurements).
@@ -91,7 +91,7 @@ def run(n, seconds, settle, workers, render_distance, infer_ms=0.0, obs="state",
     server.command("gamerule spawn_radius 0")
     config = FleetConfig(server=server.address, n=n, pairs=True, workers=workers,
                          render_distance=render_distance, root=str(root / "fleet"), obs=obs,
-                         image_size=image, frame_skip=frame_skip)
+                         image_size=image, frame_skip=frame_skip, clients_per_process=per_process)
     fleet = Fleet(config)
     gpu0 = gpu_memory_mb()
     try:
@@ -135,7 +135,9 @@ def run(n, seconds, settle, workers, render_distance, infer_ms=0.0, obs="state",
             return steps
 
         play(settle)
-        pids = [s.proc.proc.pid for s in fleet.slots]
+        # One per process; with clients_per_process K, a process's numbers are K clients'.
+        pids = list(dict.fromkeys(s.proc.proc.pid for s in fleet.slots))
+        k = n / len(pids)
         cpu0 = [cpu_seconds(p) for p in pids]
         server_cpu0, py_cpu0 = cpu_seconds(server.proc.pid), time.process_time()
         stats = dict(slot_steps=0, ticks=0, late=0, overrun_ms=0.0, over_steps=0, hits=0, deaths=0,
@@ -145,11 +147,11 @@ def run(n, seconds, settle, workers, render_distance, infer_ms=0.0, obs="state",
         steps = 0
         while time.monotonic() - t0 < seconds:
             steps += play(min(2.0, seconds - (time.monotonic() - t0)), stats)
-            rss += [r for r in map(rss_mb, pids) if r is not None]
+            rss += [r / k for r in map(rss_mb, pids) if r is not None]
         dt = time.monotonic() - t0
-        pss = [m[1] for m in map(memory_mb, pids) if m]
+        pss = [m[1] / k for m in map(memory_mb, pids) if m]
         gpu1 = gpu_memory_mb()
-        cpu = [(c1 - c0) / dt * 100 for c0, c1 in zip(cpu0, (cpu_seconds(p) for p in pids))
+        cpu = [(c1 - c0) / dt * 100 / k for c0, c1 in zip(cpu0, (cpu_seconds(p) for p in pids))
                if c0 is not None and c1 is not None]
         restarts = sum(s.restarts for s in fleet.slots)
         ss = max(stats["slot_steps"], 1)
@@ -158,11 +160,12 @@ def run(n, seconds, settle, workers, render_distance, infer_ms=0.0, obs="state",
             "obs": obs,
             "image": f"{image[0]}x{image[1]}" if obs != "state" else None,
             "frame_skip": frame_skip,
+            "per_process": per_process,
             "infer_ms": infer_ms,
             "started_s": round(started_in, 1),
             "client_cpu_pct_mean": round(mean(cpu), 2),
             "client_cpu_pct_max": round(max(cpu), 2) if cpu else None,
-            "clients_cpu_pct_total": round(sum(cpu), 1),
+            "clients_cpu_pct_total": round(sum(cpu) * k, 1),
             "client_rss_mb_mean": round(mean(rss), 1),
             "client_rss_mb_max": round(max(rss), 1) if rss else None,
             "client_pss_mb_mean": round(mean(pss), 1),
@@ -199,12 +202,14 @@ def main():
     ap.add_argument("--obs", default="state", choices=["state", "image", "both"])
     ap.add_argument("--image", default="64x64", help="WxH of the frames with --obs image|both")
     ap.add_argument("--frame-skip", type=int, default=1)
+    ap.add_argument("--per-process", type=int, default=1,
+                    help="clients per process (model B); per-client numbers are a process's / K")
     ap.add_argument("--out")
     args = ap.parse_args()
     for n in (int(x) for x in args.ns.split(",")):
         image = tuple(int(v) for v in args.image.lower().split("x"))
         result = run(n, args.seconds, args.settle, args.workers, args.render_distance, args.infer_ms,
-                     args.obs, image, args.frame_skip)
+                     args.obs, image, args.frame_skip, args.per_process)
         line = json.dumps(result)
         print(line, flush=True)
         if args.out:

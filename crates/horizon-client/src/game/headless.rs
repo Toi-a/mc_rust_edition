@@ -58,8 +58,10 @@ impl Game<'_> {
         };
         // `--render`: a renderer without a window (RL image observations).
         self.headless_renderer();
+        // `--rl-client`: the process's other clients, on their threads (game/rl/shard.rs).
+        let shard = self.rl_shard();
         self.previous = Instant::now();
-        while !ctl.exit.get() {
+        while !ctl.exit.get() && !super::agent::rl::shard_ended() {
             // An RL client lines its ticks up after its steps (game/rl): the wait moves the
             // frame and the tick clock together.
             let waited = self.rl_await_step();
@@ -75,6 +77,7 @@ impl Game<'_> {
             }
         }
         self.shut_down();
+        drop(shard);
     }
 
     /// When the tick clock's next tick is due, in a world that ticks: from the residual the last

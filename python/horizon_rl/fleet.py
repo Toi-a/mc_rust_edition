@@ -1,5 +1,7 @@
-"""N headless clients from one config, each in its own process, kept alive by a supervisor
-(docs/rl/design.md#fault-isolation-and-reconnects).
+"""N headless clients from one config, kept alive by a supervisor
+(docs/rl/design.md#fault-isolation-and-reconnects). Each runs in its own process, or with
+`clients_per_process` K > 1, K slots share one (process model B, `--rl-client`: one copy of the
+resources and one GPU device for K clients); a fault in any of them restarts the K together.
 
 - Starts are staggered (`stagger` seconds apart, restarts included), so a server's connection
   throttle doesn't refuse them.
@@ -56,6 +58,8 @@ class FleetConfig:
     render_distance: int = 2
     # Worker threads per client (chunk streaming jobs). Headless needs few.
     workers: int = 1
+    # Clients per process (model B): slots i*K .. i*K+K-1 share one, and restart together.
+    clients_per_process: int = 1
     stagger: float = 0.25
     hang_timeout: float = 5.0
     step_timeout: float = 10.0
@@ -122,6 +126,7 @@ class Slot:
         self.last_frame = 0  # and its frame, with images
         self.episode_start = False
         self.need_reset = True
+        self.group = [self]  # the slots sharing its process, itself included
 
 
 class Fleet:
@@ -136,7 +141,15 @@ class Fleet:
         self.config = config
         self.root = Path(config.root or tempfile.mkdtemp(prefix="horizon-rl-fleet-"))
         self.root.mkdir(parents=True, exist_ok=True)
+        if config.clients_per_process < 1:
+            raise ValueError("clients_per_process: at least 1")
         self.slots = [Slot(i, config.name(i)) for i in range(config.n)]
+        k = config.clients_per_process
+        # The slots of one process: its first starts it, the others are its `--rl-client`s.
+        self.groups = [self.slots[i:i + k] for i in range(0, config.n, k)]
+        for group in self.groups:
+            for slot in group:
+                slot.group = group
         self.selector = selectors.DefaultSelector()
         self.next_start = time.monotonic()
         self.state_len = None
@@ -149,8 +162,9 @@ class Fleet:
 
     # -- processes ---------------------------------------------------------------------------
 
-    def _launch(self, slot, now):
+    def _launch(self, group, now):
         c = self.config
+        slot = group[0]
         extra = list(c.extra_args)
         target = c.target_of(slot.index)
         if target:
@@ -167,30 +181,37 @@ class Fleet:
             # shares: N clients mapping blocks there run it out (third_party/wgpu-hal).
             env["HORIZON_NO_BAR_UPLOADS"] = os.environ.get("HORIZON_NO_BAR_UPLOADS", "1")
             render_options = RENDER_OPTIONS
-        slot.proc = ClientProcess(c.server, slot.name, self.root, render_distance=c.render_distance,
-                                  extra=extra, binary=c.binary or None,
-                                  resources=c.resources or None, env=env,
-                                  render_options=render_options)
-        slot.state = "starting"
-        slot.until = now + c.start_timeout
+        peers = [(s.name, c.target_of(s.index)) for s in group[1:]]
+        proc = ClientProcess(c.server, slot.name, self.root, render_distance=c.render_distance,
+                             extra=extra, binary=c.binary or None, resources=c.resources or None,
+                             env=env, render_options=render_options, peers=peers)
+        for s in group:
+            s.proc = proc
+            s.state = "starting"
+            s.until = now + c.start_timeout
 
     def _fail(self, slot, reason, now):
-        """Kills the slot's process and plans its restart."""
+        """Kills the slot's process and plans its restart: with the other slots of that process,
+        which end with the same reason, "(shard)" added."""
         if slot.healthy_since is not None and now - slot.healthy_since >= RESTART_STABLE:
             slot.attempts = 0
-        self._close_conn(slot)
         if slot.proc is not None:
             slot.proc.stop(timeout=2)
-            slot.proc = None
         delay = RESTART_DELAYS[min(slot.attempts, len(RESTART_DELAYS) - 1)]
         slot.attempts += 1
-        slot.restarts += 1
-        slot.healthy_since = None
-        slot.state = "backoff"
-        slot.until = now + delay
-        slot.need_reset = True
-        if slot.reason is None:
-            slot.reason = reason
+        for s in slot.group:
+            if s is not slot and s.state == "backoff":
+                continue
+            self._close_conn(s)
+            s.proc = None
+            s.attempts = max(s.attempts, slot.attempts)
+            s.restarts += 1
+            s.healthy_since = None
+            s.state = "backoff"
+            s.until = now + delay
+            s.need_reset = True
+            if s.reason is None:
+                s.reason = reason if s is slot else f"{reason} (shard)"
 
     def _close_conn(self, slot):
         if slot.sock is not None:
@@ -209,11 +230,12 @@ class Fleet:
     def _pump(self, timeout):
         """One round: start what is due, read every socket, watch heartbeats and deadlines."""
         now = time.monotonic()
-        for slot in self.slots:
-            if slot.state == "backoff" and now >= slot.until and now >= self.next_start:
-                self._launch(slot, now)
+        for group in self.groups:
+            if (now >= self.next_start and all(s.state == "backoff" and now >= s.until for s in group)):
+                self._launch(group, now)
                 self.next_start = now + self.config.stagger
-            elif slot.state == "starting":
+        for slot in self.slots:
+            if slot.state == "starting":
                 self._try_connect(slot, now)
         for key, _ in self.selector.select(timeout):
             self._read(key.data, time.monotonic())
@@ -235,13 +257,14 @@ class Fleet:
                 self._fail(slot, "timeout" if slot.state == "stepping" else "start timeout", now)
 
     def _try_connect(self, slot, now):
-        if not slot.proc.socket.exists():
+        path = slot.proc.sockets[slot.name]
+        if not path.exists():
             if now > slot.until:
                 self._fail(slot, "start timeout", now)
             return
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            s.connect(str(slot.proc.socket))
+            s.connect(str(path))
         except (FileNotFoundError, ConnectionRefusedError):
             s.close()
             return

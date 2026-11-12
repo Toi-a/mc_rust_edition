@@ -43,6 +43,22 @@ class FleetConfigTest(unittest.TestCase):
             self.assertEqual(fleet.frames.shape, (3, 64, 96))
             fleet.close()
 
+    def test_slots_sharing_a_process_restart_together(self):
+        from horizon_rl.fleet import Fleet
+        with tempfile.TemporaryDirectory() as d:
+            fleet = Fleet(FleetConfig(server="h:1", n=5, clients_per_process=2, root=d))
+            self.assertEqual([[s.index for s in g] for g in fleet.groups], [[0, 1], [2, 3], [4]])
+            for s in fleet.slots:
+                s.state, s.need_reset = "ready", False
+            fleet._fail(fleet.slots[1], "hang", 100.0)
+            self.assertEqual([s.state for s in fleet.slots],
+                             ["backoff", "backoff", "ready", "ready", "ready"])
+            self.assertEqual((fleet.slots[1].reason, fleet.slots[0].reason), ("hang", "hang (shard)"))
+            self.assertEqual(fleet.slots[0].until, fleet.slots[1].until, "one restart for both")
+            with self.assertRaisesRegex(ValueError, "clients_per_process"):
+                Fleet(FleetConfig(server="h:1", clients_per_process=0, root=d))
+            fleet.close()
+
     def test_the_example_config_loads(self):
         example = Path(__file__).resolve().parents[1] / "examples" / "fleet.toml"
         self.assertTrue(FleetConfig.load(example).pairs)

@@ -5,8 +5,8 @@ way: [design.md](design.md).
 
 Status: **M3**: N headless clients from one command or config, each in its own process,
 supervised (reconnects, restarts, hang detection), stepped together at 20 Hz from Python, with
-the fair-play state vector and, optionally, grayscale frames of each player's view. The
-Gymnasium env (M4) comes next.
+the fair-play state vector and, optionally, grayscale frames of each player's view; optionally
+several clients per process (model B). The Gymnasium env (M4) comes next.
 
 ## Set up
 
@@ -88,8 +88,8 @@ Options (or keys of the TOML file, `FleetConfig` in `python/horizon_rl/fleet.py`
 `names` (a format of `{i}`, default `Agent_{i}`), `pairs` (2k and 2k+1 are each other's
 opponent) or `target` (a format of `{i}`), `obs` (`state`, `image` or `both`: every mode returns
 the state vector; `image` and `both` add frames), `image_size` (`[64, 64]`), `hud` (false), `frame_skip`,
-`render_distance` (2), `workers` (worker threads per client, 1), `stagger` (seconds between
-starts, 0.25), `hang_timeout` (5 s). It prints steps/s, the clients playing, late ticks, ended
+`render_distance` (2), `workers` (worker threads per client, 1), `clients_per_process` (1; see
+below), `stagger` (seconds between starts, 0.25), `hang_timeout` (5 s). It prints steps/s, the clients playing, late ticks, ended
 episodes and restarts every 10 s. Each client's files and log are under `--root` (default a new
 temp folder) in `NAME/`.
 
@@ -120,6 +120,16 @@ with Fleet(FleetConfig(server="HOST:PORT", n=8, pairs=True)) as fleet:
   anyone's tick. Measured: 40 clients fighting hold 20 Hz with no late ticks, with or without 10 ms
   of inference per step ([design.md](design.md#m2-measurements)).
 
+### Several clients per process
+
+`clients_per_process = K` (`horizon-rl --per-process K`) runs slots `iK … iK+K-1` in one process
+(`--rl-client`, process model B): K clients share one copy of the game's resources and, with
+images, one GPU device, each on its own thread. It saves memory per client
+([design.md](design.md#model-b-measurements)); the price is fault isolation: a crash or hang of
+one restarts the K together (each a truncated episode; the others' `reset_reason` ends in
+`(shard)`). A kick still stays one client's own. Every slot keeps its own socket, shared memory and
+folder (`NAME/`); the process's log is in its first slot's folder.
+
 ## Server
 
 The client speaks only Minecraft 26.3 (protocol 777). On Paper: a 26.3 build, or ViaVersion (plus
@@ -136,8 +146,10 @@ python/.venv/bin/python -m unittest discover -s python/tests -p "test_*.py"   # 
 python/.venv/bin/python python/tests/e2e_duel.py         # M1 end to end: 2 clients on a local server
 python/.venv/bin/python python/tests/e2e_fleet.py        # M2: 4 fighting clients; kill, kick, hang, death
 python/.venv/bin/python python/tests/e2e_image.py        # M3: frames: sky/ground, the opponent, frame skip, HUD
+python/.venv/bin/python python/tests/e2e_shard.py        # model B: 4 image clients in 2 processes; kick, kill
 python/.venv/bin/python python/bench/fleet.py --ns 2,8,16,32   # CPU, RSS, 20 Hz as N grows (--infer-ms 10)
 python/.venv/bin/python python/bench/fleet.py --ns 8,32 --obs image --image 64x64   # the same with frames (+ GPU memory)
+python/.venv/bin/python python/bench/fleet.py --ns 32 --obs image --per-process 8      # model B: 8 clients per process
 python/.venv/bin/python python/bench/transport.py        # binary socket vs the JSON control socket
 python3 python/bench/baseline.py . [--fleet 10]          # CPU and RSS per idle client
 cargo test -p horizon-rl-proto                           # the wire format

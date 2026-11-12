@@ -67,6 +67,11 @@ thread_local! {
     static OPTIONS: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
+/// This thread's game reads and writes `path` as its `options.txt` (an RL shard's client).
+pub(super) fn set_options_path(path: Option<PathBuf>) {
+    OPTIONS.set(path);
+}
+
 /// The `options.txt` of the player whose turn it is; `None` for P1.
 pub(super) fn options_path() -> Option<PathBuf> {
     OPTIONS.with_borrow(Clone::clone)

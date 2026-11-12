@@ -24,8 +24,10 @@
 mod fair_play;
 mod image;
 mod reconnect;
+mod shard;
 
 pub(in super::super) use image::parse_image_size;
+pub(in super::super) use shard::{Peer, ended as shard_ended};
 
 use super::super::{Game, Screen};
 use fair_play::{SelfView, TargetView};
@@ -57,6 +59,8 @@ pub(in super::super) struct RlOptions {
     pub image: Option<[u32; 2]>,
     /// `--rl-hud`: those frames show the HUD (hidden by default, as F1).
     pub hud: bool,
+    /// `--rl-client`: more clients in this process ([`shard`]).
+    pub peers: Vec<Peer>,
 }
 
 /// The held keys, by their action bit, as the default key bindings name them.

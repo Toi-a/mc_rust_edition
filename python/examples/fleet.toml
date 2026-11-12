@@ -10,5 +10,6 @@ hud = false                     # draw the HUD in the frames
 frame_skip = 1
 render_distance = 2
 workers = 1                     # worker threads per client
+clients_per_process = 1         # K > 1: K clients share a process, its resources and GPU device
 stagger = 0.25                  # seconds between process starts
 hang_timeout = 5.0              # no heartbeat for this long: kill and restart
