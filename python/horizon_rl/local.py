@@ -105,7 +105,7 @@ class ClientProcess:
     `rl=False`."""
 
     def __init__(self, server_address, name, root, rl=True, render_distance=2, extra=(),
-                 binary=None, resources=None):
+                 binary=None, resources=None, env=None):
         self.name = name
         self.root = Path(root) / name
         self.game_dir = self.root / "game"
@@ -119,16 +119,22 @@ class ClientProcess:
         if rl:
             cmd += ["--rl-socket", str(self.socket), "--rl-shm", str(self.shm)]
         self.log = self.root / "out.log"
-        self.proc = subprocess.Popen(cmd, cwd=self.game_dir, env=scratch_env(self.root / "home"),
-                                     stdout=self.log.open("w"), stderr=subprocess.STDOUT)
+        if self.socket is not None:
+            self.socket.unlink(missing_ok=True)  # a restart's: wait for the new one
+        full_env = scratch_env(self.root / "home")
+        full_env.update(env or {})
+        with self.log.open("a") as log:
+            self.proc = subprocess.Popen(cmd, cwd=self.game_dir, env=full_env, stdout=log,
+                                         stderr=subprocess.STDOUT)
 
-    def stop(self):
+    def stop(self, timeout=15):
         if self.proc.poll() is None:
             self.proc.terminate()
             try:
-                self.proc.wait(15)
+                self.proc.wait(timeout)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.proc.wait()
         if self.shm is not None:
             try:
                 self.shm.unlink()

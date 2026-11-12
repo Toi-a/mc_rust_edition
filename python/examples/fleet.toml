@@ -1,0 +1,12 @@
+# horizon-rl --config python/examples/fleet.toml
+# Every key is a FleetConfig field (python/horizon_rl/fleet.py); command-line options override it.
+server = "192.168.1.50:25565"   # an offline-mode 26.3 server (Paper: connection-throttle -1)
+n = 8
+names = "Agent_{i}"
+pairs = true                    # 2k and 2k+1 fight each other (or: target = "Rival_{i}")
+obs = "state"
+frame_skip = 1
+render_distance = 2
+workers = 1                     # worker threads per client
+stagger = 0.25                  # seconds between process starts
+hang_timeout = 5.0              # no heartbeat for this long: kill and restart

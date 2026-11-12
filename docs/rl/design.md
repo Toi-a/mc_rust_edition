@@ -1,7 +1,8 @@
 # Horizon RL: design
 
-Status: **reviewed** (2026-11-10). Nothing here is built yet. The client baseline is measured
-(see [Baseline](#baseline-measurements)); the transport numbers come with M1.
+Status: **reviewed** (2026-11-10). M1 (one client from Python) and M2 (a supervised fleet,
+[measured](#m2-measurements)) are built; images (M3), the Gymnasium env (M4) and removal (M5) are
+next.
 
 Goal: many headless 26.3 clients, each an offline-mode player on a remote (Paper) server, driven
 from Python through a Gymnasium env for PvP self-play. Per-instance CPU and RAM are the main costs.
@@ -87,6 +88,17 @@ blocks it.
   `info` reports `ticks_elapsed` (ticks since the previous observation), `late_ticks` (ticks run
   without a fresh action), and the client's own `tick_overrun_ms` (its tick took over 50 ms). Python
   can then drop those transitions or flag them.
+- **Ticks line up after the steps** (headless, built in M2). A batch of N clients waits for the
+  last of them, but each client ticks on its own phase: once the policy takes time between the
+  last `READY` and the next sends, every client whose tick falls in that gap ticks without its
+  action. So a headless client whose step is owed waits for it a little before its tick, and its
+  tick clock moves by the wait (`--rl-step-grace`, 20 ms by default, 0 turns it off). The clients
+  soon all tick just after Python sends. The waits are bounded: each tick earns 2.5 ms of waiting
+  (at most 40 ms saved), so a Python that is slow for good slows a client by 5 % at most and still
+  shows as late ticks. No wait happens off the world or during a reset. Measured with 32 fighting
+  clients and 10 ms of inference per step: 2 275 late ticks in 25 s without it, 15 with it.
+- The headless loop wakes when the tick clock's next tick is due (not on a fixed 50 ms cadence),
+  so each frame carries one tick, never zero then two.
 - **Lockstep later:** `HELLO` carries `mode = realtime | lockstep`. Only `realtime` exists now. In
   lockstep, the client waits for each `STEP` before ticking. The protocol stays the same.
 
@@ -170,7 +182,7 @@ These are signals only. Python builds the reward.
 | `kills`, `deaths` | death messages: system chat with `death.attack.*` translation keys whose arguments name us (parsed from the component, not English text) |
 | `died` | `ClientboundPlayerCombatKill` for ourselves |
 | `respawned` | `ClientboundRespawn`. After death the client presses Respawn automatically (the button a human clicks) |
-| `disconnected`, `reason`, `reconnects` | the connection and the reconnect loop |
+| `connected`, `disconnected`, `disconnects_total`, `reconnects_total` | the connection and the reconnect loop; the reason comes in a `NOTE` |
 | `ticks_elapsed`, `late_ticks`, `tick_overrun_ms` | timing (above) |
 
 Episodes: `terminated = True` when the agent dies. The next `reset()` returns the observation after
@@ -182,22 +194,41 @@ Paper plugin over a side channel.
 
 ## Fault isolation and reconnects
 
-- The supervisor (Python `horizon_rl.launch`, or a `horizon-rl` CLI on top of it) owns every
-  process. Each one gets its own scratch `HORIZON_HOME`, `--player-dir`, socket and shm file.
-- When a socket or process dies, the supervisor restarts it with exponential backoff and the env
-  reports a reset for that slot. Other instances are unaffected.
-- When the client is kicked or disconnected, it reconnects itself (with backoff) instead of
-  showing the Disconnected screen. The supervisor watches only for hangs: no tick for 5 s means a
-  kill and a restart.
-- Joins are staggered (default 250 ms). Paper's `bukkit.yml` `settings.connection-throttle`
-  (default 4000 ms per IP) would otherwise reject N clients from one IP. Set it to `-1` on the
-  training server.
+Built in M2. The supervisor is `horizon_rl.fleet.Fleet` (Python), started from a `FleetConfig`
+or the `horizon-rl` command.
+
+- It owns every process. Each one gets its own scratch homes and game folder, socket and shm
+  file, and `HORIZON_JOB_THREADS`/`HORIZON_WORKER_THREADS` = `workers` (default 1).
+- **The client stays on its server** (`game/rl/reconnect.rs`). Off it (the Disconnected or error
+  screen: a kick, a timeout, the server closing, a failed join), it joins the `--server` again
+  after 1, 2, 4, 8, 16, then every 30 s; 30 s connected starts the delays over. Unlike the
+  auto-reconnect extra for people, kicks are retried too. The game sends a `NOTE`
+  (`{"event":"disconnected","reason":…}`), counts `disconnected`/`disconnects_total`/
+  `reconnects_total` in `info`, and keeps answering steps at 20 Hz off the world (`connected` 0),
+  so Python never blocks on it.
+- **Heartbeat**: the game bumps a `u64` in the shm header (`BEAT_OFF` = 56) every frame. The
+  supervisor kills a process whose heartbeat stands still for `hang_timeout` (5 s), that exits,
+  that closes its socket, or that doesn't answer a step within `step_timeout` (10 s), and starts it
+  again after 1, 2, 4 … 30 s (60 s healthy starts them over).
+- **What Python sees**: the step that meets a fault is `truncated` with `info["reset_reason"]`
+  (`crash (…)`, `hang`, `timeout`, `disconnected: <reason>`). A death is `terminated`. An ended slot
+  resets by itself: it is left out of the next steps (`active` False) until it is alive again, and
+  its first observation comes with `info["episode_start"]`. A fault between episodes is named in
+  that first info's `reset_reason`. No fault touches another slot (`python/tests/e2e_fleet.py`
+  checks a kill, a kick, a SIGSTOP hang and a death on four fighting clients).
+- Joins are staggered (`stagger`, default 250 ms; restarts too). Paper's `bukkit.yml`
+  `settings.connection-throttle` (default 4000 ms per IP) would otherwise reject N clients from
+  one IP. Set it to `-1` on the training server.
+- Headless clients don't open the controller backend (gilrs and its udev thread). With one
+  worker, a client runs 6 threads (25 before).
 
 ## Python package
 
 `python/horizon_rl/` (installable with `pip install -e python/`):
 
-- `HorizonClient`: one instance (socket, shm, numpy views).
+- `HorizonClient`: one instance (socket, shm, numpy views), blocking.
+- `Fleet` / `FleetConfig` (M2): N instances, stepped together without threads (one `selectors`
+  loop), supervised; `horizon-rl` runs one from the command line or a TOML file.
 - `HorizonEnv(gymnasium.Env)`: one agent.
 - `HorizonVecEnv(gymnasium.vector.VectorEnv)`: sends all actions, then waits for all
   observations. Instances run in parallel in real time, so this costs no extra threads.
@@ -271,4 +302,44 @@ What this says:
   offscreen device adds ~200 MB per process, as expected.
 - **Threads to cut**: headless still starts 15 streaming workers and the controller backend (it found a
   gamepad). Both are candidates for M1/M5 defaults (`--workers 1`, no gamepad).
-- Still to measure: CPU under motion and combat, and many instances at once (M2).
+- Still to measure: CPU under motion and combat, and many instances at once (M2, below).
+
+## M2 measurements
+
+Measured 2026-11-12 on the same desktop, `--profile fast`, with `python/bench/fleet.py --ns
+2,8,16,32,40 --seconds 30 --settle 10` (and `--infer-ms 10` for the last two rows). Each N gets a
+fresh local dedicated server (offline, normal world, seed 1234, `spawn_radius 0`) and N clients in
+pairs with diamond swords. The scripted fighter (`horizon_rl/scripted.py`, observation only) turns
+to its partner, runs at it, strafes, jumps, swings at full cooldown, dies and respawns; one Python
+process steps all N every tick (frame skip 1). 30 s are measured after 10 s of fighting. CPU is
+utime + stime of all threads from `/proc`, in % of one core.
+
+| N | inference | client CPU % (mean / max) | client RSS MB (mean / max) | PSS MB | vector steps/s | late ticks per 1000 steps | tick overruns | server CPU % | Python CPU % |
+|---|---|---|---|---|---|---|---|---|---|
+| 2 | 0 | 1.05 / 1.20 | 396 / 399 | 361 | 20.00 | 0 | 0 | 6 | 0.4 |
+| 8 | 0 | 1.07 / 1.23 | 396 / 401 | 349 | 20.00 | 0 | 0 | 10 | 1.1 |
+| 16 | 0 | 1.23 / 1.43 | 395 / 407 | 346 | 20.01 | 0 | 0 | 12 | 2.2 |
+| 32 | 0 | 1.43 / 1.70 | 394 / 404 | 343 | 20.01 | 0 | 0 | 19 | 5.5 |
+| 40 | 0 | 1.53 / 1.73 | 385 / 405 | 334 | 20.00 | 0 | 0 | 23 | 7.6 |
+| 32 | 10 ms | 1.54 / 1.76 | 394 / 402 | 343 | 20.00 | 0 | 0 | 21 | 5.7 |
+| 40 | 10 ms | 1.58 / 1.77 | 388 / 403 | 337 | 19.99 | 0 | 0 | 23 | 7.7 |
+
+(Tick overruns: client ticks over 50 ms. Over 30 s, N = 40 played 685 hits and 93 deaths; no slot
+was truncated or restarted.)
+
+What this says:
+
+- **20 Hz holds at every N measured, up to 40**, with no late ticks, also with 10 ms of
+  inference per step. CPU is far from the limit: 40 fighting clients take 0.6 of a core in total
+  (~1.5 % each), the 16-thread machine is ~95 % idle.
+- **Memory sets the largest N.** ~390 MB RSS (~340 MB PSS) per client, flat in N. 40 clients used
+  ~15.4 GB of the 23 GB. N = 40 is the most measured; by memory, ~48–50 fit with ~2 GB left for the
+  trainer, without images. That's 4–5× the ~10 Java clients. More needs less memory per process
+  (the shards of model B, or trimming what headless loads: M5).
+- Starting is quick: 40 clients are in and alive 14 s after the command (250 ms stagger).
+- Measurement pitfall: reading `/proc/PID/smaps_rollup` for every client during the run stalls
+  the stepping loop enough to cause late ticks; the benchmark reads RSS from `statm` and PSS once,
+  afterwards.
+- The local stand-in server spends ~5 cores on a **flat** world as soon as players are on it, even
+  idle (a normal world: ~6 %). That is a Horizon dedicated-server issue, not the clients'; the e2e
+  tests still use flat, the benchmark a normal world. On Paper this doesn't apply.

@@ -5,12 +5,15 @@ are not: they come from the game's WELCOME reply, so they can't drift from the R
 """
 import struct
 
-VERSION = 1
+VERSION = 2
 SHM_MAGIC = b"HZRL"
 HEADER_LEN = 64
+# The game bumps a u64 here every frame (in or out of a world): the supervisor's hang check.
+BEAT_OFF = 56
 
 HELLO, STEP, RESET, CLOSE = 1, 2, 3, 4
-WELCOME, READY, ERROR = 0x81, 0x82, 0xFF
+# NOTE: JSON about the connection, sent at any time ({"event": "disconnected", "reason": ...}).
+WELCOME, READY, NOTE, ERROR = 0x81, 0x82, 0x83, 0xFF
 
 FORWARD = 1 << 0
 BACK = 1 << 1
@@ -54,6 +57,10 @@ def read_header(buf):
     return {"magic": magic, "version": version, "seq": seq, "tick": tick, "state_off": state_off,
             "state_len": state_len, "info_off": info_off, "info_len": info_len,
             "frame_off": frame_off, "frame_w": w, "frame_h": h}
+
+
+def read_beat(buf):
+    return struct.unpack_from("<Q", buf, BEAT_OFF)[0]
 
 
 def buttons_of(action):

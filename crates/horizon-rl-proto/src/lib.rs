@@ -16,11 +16,15 @@
 //! [docs/rl/design.md]: ../../../docs/rl/design.md
 
 /// Bumped on any change to messages or layouts.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// The first four bytes of the shared-memory file.
 pub const SHM_MAGIC: [u8; 4] = *b"HZRL";
 /// Bytes of the shared-memory header.
 pub const HEADER_LEN: usize = 64;
+/// Where the header's heartbeat is: a `u64` the game bumps every frame, in or out of a world,
+/// whether or not Python steps. A supervisor that sees it stand still knows the game hung.
+/// [`ShmLayout::header`] leaves it out, so writing an observation never moves it back.
+pub const BEAT_OFF: usize = 56;
 /// The largest payload a message may have (the welcome JSON with the item registry is ~60 KB).
 pub const MAX_PAYLOAD: usize = 1 << 20;
 
@@ -38,6 +42,10 @@ pub mod kind {
     pub const WELCOME: u32 = 0x81;
     /// Game → Python: [`super::Ready`].
     pub const READY: u32 = 0x82;
+    /// Game → Python, at any time: UTF-8 JSON about the connection, e.g.
+    /// `{"event":"disconnected","reason":"..."}` or `{"event":"reconnecting","attempt":2}`.
+    /// A reader that waits for `READY` may skip it.
+    pub const NOTE: u32 = 0x83;
     /// Game → Python: a UTF-8 reason, after which the game closes the connection.
     pub const ERROR: u32 = 0xff;
 }
@@ -183,6 +191,12 @@ impl Decoder {
     pub fn push(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
     }
+    /// Whether a whole message is buffered (or a length too large, which `next_message` refuses).
+    pub fn has_message(&self) -> bool {
+        self.buf.len() >= 8
+            && (u32_at(&self.buf, 4) as usize > MAX_PAYLOAD
+                || self.buf.len() >= 8 + u32_at(&self.buf, 4) as usize)
+    }
     /// The next whole message, `Err` when a length is over [`MAX_PAYLOAD`] (the stream is
     /// then unusable).
     pub fn next_message(&mut self) -> Result<Option<(u32, Vec<u8>)>, String> {
@@ -281,6 +295,11 @@ pub const INFO: &[Field] = &[
     f("respawned", 1),
     f("kills_total", 1),
     f("deaths_total", 1),
+    // The connection to the server was lost this step (a kick, a timeout, the server closing).
+    f("disconnected", 1),
+    f("disconnects_total", 1),
+    // Joins the client started on its own after losing the connection.
+    f("reconnects_total", 1),
 ];
 
 /// The number of `f32`s in `fields`.
@@ -338,9 +357,10 @@ impl ShmLayout {
         }
     }
 
-    /// The header for an observation of step `seq` after tick `tick`.
-    pub fn header(&self, seq: u64, tick: u64) -> [u8; HEADER_LEN] {
-        let mut h = [0u8; HEADER_LEN];
+    /// The header for an observation of step `seq` after tick `tick`, up to the heartbeat
+    /// ([`BEAT_OFF`]), which the game writes on its own.
+    pub fn header(&self, seq: u64, tick: u64) -> [u8; BEAT_OFF] {
+        let mut h = [0u8; BEAT_OFF];
         h[0..4].copy_from_slice(&SHM_MAGIC);
         h[4..8].copy_from_slice(&VERSION.to_le_bytes());
         h[8..16].copy_from_slice(&seq.to_le_bytes());
@@ -396,7 +416,7 @@ fn fields_json(fields: &[Field]) -> String {
 pub fn welcome(shm_path: &str, layout: &ShmLayout, items: &[&str], player: &str) -> String {
     let items: Vec<String> = items.iter().map(|n| json_string(n)).collect();
     format!(
-        "{{\"version\":{VERSION},\"shm\":{},\"shm_size\":{},\"state_off\":{},\"info_off\":{},\"frame_off\":{},\"frame_w\":{},\"frame_h\":{},\"state\":{},\"info\":{},\"items\":[{}],\"player\":{}}}",
+        "{{\"version\":{VERSION},\"shm\":{},\"shm_size\":{},\"beat_off\":{BEAT_OFF},\"state_off\":{},\"info_off\":{},\"frame_off\":{},\"frame_w\":{},\"frame_h\":{},\"state\":{},\"info\":{},\"items\":[{}],\"player\":{}}}",
         json_string(shm_path),
         layout.size,
         layout.state_off,
@@ -454,8 +474,9 @@ mod tests {
         stream.extend(frame(kind::RESET, &[]));
         let mut d = Decoder::default();
         let mut got = Vec::new();
-        for byte in &stream {
+        for (i, byte) in stream.iter().enumerate() {
             d.push(std::slice::from_ref(byte));
+            assert_eq!(d.has_message(), i == 15 || i == stream.len() - 1);
             while let Some(m) = d.next_message().unwrap() {
                 got.push(m);
             }
@@ -525,6 +546,7 @@ mod tests {
         assert_eq!(l.frame_off % 64, 0);
         assert!(l.frame_off >= l.info_off + 4 * INFO_LEN);
         assert_eq!(l.size, l.frame_off + 64 * 48);
+        assert!(h.len() <= BEAT_OFF && BEAT_OFF + 8 <= HEADER_LEN);
     }
 
     #[test]

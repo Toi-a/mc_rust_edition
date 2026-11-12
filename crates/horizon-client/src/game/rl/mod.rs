@@ -11,12 +11,22 @@
 //!   sees a player's normal packets. The camera is absolute: the step's yaw and pitch.
 //! - Only [`fair_play`] reads the game for the observation. The reward signals (`info`) are kept
 //!   here, apart from it.
+//! - The client stays on its server: off it (a kick, a lost connection, a failed join) it joins
+//!   again after a backoff ([`reconnect`]). Steps are still answered there, one per 50 ms, with
+//!   `connected` 0, so Python never blocks on a client that has no world to tick.
+//! - Every frame bumps the shared memory's heartbeat (`BEAT_OFF`) for the supervisor.
+//! - Headless, a client whose next step is owed waits a little for it before its tick
+//!   ([`Game::rl_await_step`]), and its tick clock moves by the wait. Clients started at different
+//!   times thus come to tick just after Python sends their steps, so a batch of N clients doesn't
+//!   wait on the one whose tick came last. The waits are bounded ([`STEP_GRACE`], [`SHIFT_PER_TICK`]):
+//!   a slow Python slows a client's ticks by 5 % at most and still shows as late ticks.
 
 mod fair_play;
+mod reconnect;
 
 use super::super::{Game, Screen};
 use fair_play::{SelfView, TargetView};
-use horizon_client::held::Source;
+use horizon_client::{held::Source, multiplayer, title::Mode};
 use horizon_protocol::registry::Builtin;
 use horizon_rl_proto::{self as proto, INFO, INFO_LEN, STATE_LEN, ShmLayout, button, kind};
 use std::{
@@ -28,7 +38,7 @@ use std::{
     },
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use winit::{event::MouseButton, keyboard::KeyCode};
 
@@ -38,6 +48,8 @@ pub(in super::super) struct RlOptions {
     pub socket: PathBuf,
     pub shm: Option<PathBuf>,
     pub target: Option<String>,
+    /// `--rl-step-grace MS`: the longest wait for an owed step ([`STEP_GRACE`] when unset).
+    pub step_grace_ms: Option<u64>,
 }
 
 /// The held keys, by their action bit, as the default key bindings name them.
@@ -55,6 +67,13 @@ const KEYS: [(u32, KeyCode); 7] = [
 /// (the server sends it the tick it handles the attack; this covers latency).
 const HIT_WINDOW_TICKS: u64 = 10;
 
+/// The longest a client waits at one tick for an owed step.
+const STEP_GRACE: Duration = Duration::from_millis(20);
+/// The waiting each tick earns (2.5 ms of 50: ticks run at least 95 % as often as 20 Hz), and
+/// the most that can be saved up.
+const SHIFT_PER_TICK: Duration = Duration::from_micros(2500);
+const SHIFT_SAVED: Duration = Duration::from_millis(40);
+
 /// What happened since the last observation (reset when one is written).
 #[derive(Default, Debug, Clone, PartialEq)]
 struct Signals {
@@ -69,6 +88,7 @@ struct Signals {
     attacks: u32,
     died: u32,
     respawned: u32,
+    disconnected: u32,
 }
 
 struct Conn {
@@ -107,6 +127,16 @@ pub(super) struct Session {
     ticks: u64,
     /// `Chat.received` when the chat was last read.
     chat_seen: u64,
+    /// The heartbeat (frames run).
+    beat: u64,
+    /// When the session last ticked itself, off its world.
+    idle_tick: Instant,
+    backoff: reconnect::Backoff,
+    was_connected: bool,
+    disconnects: u32,
+    reconnects: u32,
+    /// The waiting for steps still allowed (see [`STEP_GRACE`]).
+    shift_budget: Duration,
 }
 
 impl Session {
@@ -152,6 +182,13 @@ impl Session {
             last_attack: None,
             ticks: 0,
             chat_seen: 0,
+            beat: 0,
+            idle_tick: Instant::now(),
+            backoff: reconnect::Backoff::default(),
+            was_connected: false,
+            disconnects: 0,
+            reconnects: 0,
+            shift_budget: SHIFT_SAVED,
         })
     }
 
@@ -202,6 +239,9 @@ impl Session {
         put("respawned", s.respawned as f32);
         put("kills_total", self.kills as f32);
         put("deaths_total", self.deaths as f32);
+        put("disconnected", s.disconnected as f32);
+        put("disconnects_total", self.disconnects as f32);
+        put("reconnects_total", self.reconnects as f32);
         out
     }
 }
@@ -372,7 +412,130 @@ impl Game<'_> {
         {
             log::warn!("RL respawn: {e}");
         }
+        self.rl_stay_connected(&mut s);
+        // Off the world no client tick runs; the session ticks itself at the same 20 Hz so steps
+        // are still answered.
+        let now = Instant::now();
+        if self.title.is_none() && !self.pause {
+            s.idle_tick = now;
+        } else if now.saturating_duration_since(s.idle_tick) >= Duration::from_millis(50) {
+            s.idle_tick = now;
+            self.agent.rl = Some(s);
+            self.rl_tick_pre();
+            self.rl_tick_post(Duration::ZERO);
+            s = self.agent.rl.take().expect("the session is back");
+        }
+        s.beat += 1;
+        if let Err(e) = s
+            .shm
+            .write_all_at(&s.beat.to_le_bytes(), proto::BEAT_OFF as u64)
+        {
+            log::error!("RL shm: {e}");
+        }
         self.agent.rl = Some(s);
+    }
+
+    /// Before a headless frame: when Python owes the next step, wait for it (bounded, see
+    /// [`STEP_GRACE`]). Returns the time waited, which the caller takes out of the tick clock so
+    /// the tick moves rather than catching up.
+    pub(in super::super) fn rl_await_step(&mut self) -> Duration {
+        let in_world = self.title.is_none() && !self.pause;
+        let Some(s) = self.agent.rl.as_mut() else {
+            return Duration::ZERO;
+        };
+        let grace = s
+            .options
+            .step_grace_ms
+            .map_or(STEP_GRACE, Duration::from_millis);
+        let limit = s.shift_budget.min(grace);
+        let Some(c) = s.conn.as_mut() else {
+            return Duration::ZERO;
+        };
+        // During a reset Python waits for READY, it owes no step.
+        if !in_world
+            || !s.owed
+            || s.reset
+            || s.pending.is_some()
+            || limit.is_zero()
+            || c.decoder.has_message()
+        {
+            return Duration::ZERO;
+        }
+        let start = Instant::now();
+        let mut buf = [0u8; 4096];
+        c.stream.set_nonblocking(false).ok();
+        loop {
+            let left = limit.saturating_sub(start.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            c.stream.set_read_timeout(Some(left)).ok();
+            match c.stream.read(&mut buf) {
+                Ok(0) => break, // closed: the frame's read finds it
+                Ok(n) => {
+                    c.decoder.push(&buf[..n]);
+                    if c.decoder.has_message() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        c.stream.set_read_timeout(None).ok();
+        c.stream.set_nonblocking(true).ok();
+        let waited = start.elapsed();
+        s.shift_budget = s.shift_budget.saturating_sub(waited);
+        waited
+    }
+
+    /// Notices a lost connection, and joins the `--server` again when the backoff allows.
+    fn rl_stay_connected(&mut self, s: &mut Session) {
+        let connected = self.remote.is_some();
+        let now = Instant::now();
+        let off = match self.title.as_ref().map(|t| &t.mode) {
+            Some(Mode::Multiplayer(multiplayer::Screen::Disconnected { reason, .. })) => {
+                Some(reason.clone())
+            }
+            Some(Mode::Error { message, .. }) => Some(message.clone()),
+            _ => None,
+        };
+        if s.was_connected && !connected {
+            s.disconnects += 1;
+            s.signals.disconnected += 1;
+            let reason = off.clone().unwrap_or_default();
+            log::info!("RL: disconnected: {reason}");
+            s.send(
+                kind::NOTE,
+                format!(
+                    "{{\"event\":\"disconnected\",\"reason\":{}}}",
+                    serde_json::Value::from(reason)
+                )
+                .as_bytes(),
+            );
+        }
+        s.was_connected = connected;
+        if connected {
+            s.backoff.connected(now);
+            return;
+        }
+        let Some(address) = self.options.server.clone() else {
+            return;
+        };
+        if off.is_none() || !s.backoff.off(now) {
+            return;
+        }
+        s.reconnects += 1;
+        let attempt = s.backoff.attempts();
+        log::info!("RL: joining {address} again (attempt {attempt})");
+        s.send(
+            kind::NOTE,
+            format!("{{\"event\":\"reconnecting\",\"attempt\":{attempt}}}").as_bytes(),
+        );
+        let name = self.options.player_name();
+        if let Err(e) = self.connect_server(&address, &name) {
+            log::warn!("RL reconnect: {e}");
+        }
     }
 
     /// Lets go of every key and button the session holds.
@@ -465,6 +628,7 @@ impl Game<'_> {
         };
         s.ticks += 1;
         s.signals.ticks += 1;
+        s.shift_budget = (s.shift_budget + SHIFT_PER_TICK).min(SHIFT_SAVED);
         let over = took.as_secs_f32() * 1000.0 - 50.0;
         if over > 0.0 {
             s.signals.overrun_ms += over;

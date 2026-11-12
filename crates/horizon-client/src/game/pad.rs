@@ -324,6 +324,9 @@ impl Game<'_> {
             // held again after it.
             _ if self.scripted_run() => PadState::default(),
             Some(state) => state,
+            // A headless game has no one at a pad: the controller backend (gilrs and its
+            // udev thread) never opens.
+            None if self.options.headless => PadState::default(),
             None => self.pad.read(),
         };
         // A Nintendo pad going by its letters is read that way: its own, or the one

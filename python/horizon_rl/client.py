@@ -15,12 +15,75 @@ class Disconnected(ConnectionError):
     """The game closed the session or died."""
 
 
-class HorizonClient:
-    """A session with one `horizon-client --rl-socket PATH`.
+class Framer:
+    """Splits the bytes a socket gives into `(kind, payload)` messages."""
+
+    def __init__(self):
+        self._buf = b""
+
+    def push(self, data):
+        self._buf += data
+
+    def next(self):
+        if len(self._buf) < 8:
+            return None
+        kind, length = proto._FRAME.unpack_from(self._buf)
+        if len(self._buf) < 8 + length:
+            return None
+        payload = self._buf[8:8 + length]
+        self._buf = self._buf[8 + length:]
+        return kind, payload
+
+
+class Session:
+    """What the game's WELCOME describes: the layout, and numpy views of its shared memory."""
+
+    def __init__(self, welcome):
+        self.welcome = welcome
+        self.player = welcome["player"]
+        self.items = welcome["items"]
+        self.state_fields = {n: slice(o, o + l) for n, o, l in welcome["state"]}
+        self.info_fields = {n: slice(o, o + l) for n, o, l in welcome["info"]}
+        self.state_len = sum(l for _, _, l in welcome["state"])
+        info_len = sum(l for _, _, l in welcome["info"])
+        fd = os.open(welcome["shm"], os.O_RDONLY)
+        try:
+            self._mm = mmap.mmap(fd, welcome["shm_size"], prot=mmap.PROT_READ)
+        finally:
+            os.close(fd)
+        self._beat = np.frombuffer(self._mm, np.uint64, 1, welcome.get("beat_off", proto.BEAT_OFF))
+        self._state = np.frombuffer(self._mm, np.float32, self.state_len, welcome["state_off"])
+        self._info = np.frombuffer(self._mm, np.float32, info_len, welcome["info_off"])
+
+    def beat(self):
+        """The game's heartbeat: it grows every frame while the game runs."""
+        return int(self._beat[0])
+
+    def observation(self):
+        """The current state vector (a copy) and info dict."""
+        state = self._state.copy()
+        info = {n: (float(self._info[s][0]) if s.stop - s.start == 1 else self._info[s].copy())
+                for n, s in self.info_fields.items()}
+        return state, info
+
+    def field(self, state, name):
+        return state[self.state_fields[name]]
+
+    def close(self):
+        self._beat = self._state = self._info = None
+        try:
+            self._mm.close()
+        except (BufferError, AttributeError):
+            pass
+
+
+class HorizonClient(Session):
+    """A blocking session with one `horizon-client --rl-socket PATH`.
 
     `step` sends one action and returns `(state, info)` for the observation after it: `state` is
     a copy of the state vector (float32, the fair-play view), `info` a dict of reward signals.
-    The layout is the game's own (`self.state_fields`: name -> slice).
+    The layout is the game's own (`self.state_fields`: name -> slice). Connection notes (lost
+    connection, reconnect attempts) collect in `self.notes`.
     """
 
     def __init__(self, socket_path, frame_skip=1, connect_timeout=60.0, step_timeout=10.0):
@@ -28,28 +91,16 @@ class HorizonClient:
         self.frame_skip = frame_skip
         self.step_timeout = step_timeout
         self.seq = 0
+        self.notes = []
         self.sock = self._connect(connect_timeout)
-        self._buf = b""
+        self._framer = Framer()
         self.sock.sendall(proto.hello(frame_skip))
         kind, payload = self._read(timeout=connect_timeout)
         if kind == proto.ERROR:
             raise Disconnected(payload.decode(errors="replace"))
         if kind != proto.WELCOME:
             raise Disconnected(f"expected WELCOME, got {kind:#x}")
-        self.welcome = json.loads(payload)
-        self.player = self.welcome["player"]
-        self.items = self.welcome["items"]
-        self.state_fields = {n: slice(o, o + l) for n, o, l in self.welcome["state"]}
-        self.info_fields = {n: slice(o, o + l) for n, o, l in self.welcome["info"]}
-        state_len = sum(l for _, _, l in self.welcome["state"])
-        info_len = sum(l for _, _, l in self.welcome["info"])
-        fd = os.open(self.welcome["shm"], os.O_RDONLY)
-        try:
-            self._mm = mmap.mmap(fd, self.welcome["shm_size"], prot=mmap.PROT_READ)
-        finally:
-            os.close(fd)
-        self._state = np.frombuffer(self._mm, np.float32, state_len, self.welcome["state_off"])
-        self._info = np.frombuffer(self._mm, np.float32, info_len, self.welcome["info_off"])
+        super().__init__(json.loads(payload))
 
     def _connect(self, timeout):
         deadline = time.monotonic() + timeout
@@ -67,12 +118,9 @@ class HorizonClient:
     def _read(self, timeout):
         self.sock.settimeout(timeout)
         while True:
-            if len(self._buf) >= 8:
-                kind, length = proto._FRAME.unpack_from(self._buf)
-                if len(self._buf) >= 8 + length:
-                    payload = self._buf[8:8 + length]
-                    self._buf = self._buf[8 + length:]
-                    return kind, payload
+            message = self._framer.next()
+            if message is not None:
+                return message
             try:
                 chunk = self.sock.recv(1 << 16)
             except socket.timeout as e:
@@ -81,24 +129,19 @@ class HorizonClient:
                 raise Disconnected(str(e)) from e
             if not chunk:
                 raise Disconnected("the game closed the connection")
-            self._buf += chunk
+            self._framer.push(chunk)
 
     def _ready(self, seq, timeout):
         while True:
             kind, payload = self._read(timeout)
             if kind == proto.ERROR:
                 raise Disconnected(payload.decode(errors="replace"))
+            if kind == proto.NOTE:
+                self.notes.append(json.loads(payload))
             if kind == proto.READY:
                 got, tick = proto.read_ready(payload)
                 if got == seq:
                     return tick
-
-    def observation(self):
-        """The current state vector (a copy) and info dict."""
-        state = self._state.copy()
-        info = {n: (float(self._info[s][0]) if s.stop - s.start == 1 else self._info[s].copy())
-                for n, s in self.info_fields.items()}
-        return state, info
 
     def step(self, buttons=0, hotbar=0, yaw=math.nan, pitch=math.nan, frame_skip=0):
         """Holds `buttons` (proto bits; attack is a click) from the next tick, faces `yaw`/`pitch`
@@ -109,14 +152,11 @@ class HorizonClient:
         return self.observation()
 
     def reset(self, timeout=120.0):
-        """Waits until the player is alive in the world (after a death, the respawn), then
-        returns its observation."""
+        """Waits until the player is alive in the world (after a death, the respawn; after a lost
+        connection, the join), then returns its observation."""
         self.sock.sendall(proto.frame(proto.RESET))
         self._ready(0, timeout)
         return self.observation()
-
-    def field(self, state, name):
-        return state[self.state_fields[name]]
 
     def close(self):
         try:
@@ -124,11 +164,7 @@ class HorizonClient:
         except OSError:
             pass
         self.sock.close()
-        try:
-            self._state = self._info = None
-            self._mm.close()
-        except (BufferError, AttributeError):
-            pass
+        super().close()
 
     def __enter__(self):
         return self

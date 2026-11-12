@@ -12,5 +12,8 @@ dependencies = ["numpy>=1.24", "gymnasium>=0.29"]
 [project.optional-dependencies]
 bench = ["psutil>=5.9"]
 
+[project.scripts]
+horizon-rl = "horizon_rl.launch:main"
+
 [tool.setuptools]
 packages = ["horizon_rl"]

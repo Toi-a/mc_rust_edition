@@ -3,9 +3,9 @@
 Headless 26.3 clients that Python drives, for PvP self-play. The design, and why it is built this
 way: [design.md](design.md).
 
-Status: **M1** — one headless client controlled from Python (join, observe through the fair-play
-view, act, see the result). Several clients from one command (M2), image observations (M3) and
-the Gymnasium env (M4) come next.
+Status: **M2**: N headless clients from one command or config, each in its own process,
+supervised (reconnects, restarts, hang detection), stepped together at 20 Hz from Python. Image
+observations (M3) and the Gymnasium env (M4) come next.
 
 ## Set up
 
@@ -51,6 +51,46 @@ with HorizonClient("/tmp/agent1.sock", frame_skip=1) as env:
 - After a death the client clicks Respawn itself; `info["died"]` marks the step, and `reset()`
   returns once the player is back.
 
+## Run a fleet
+
+```sh
+python/.venv/bin/horizon-rl --server HOST:PORT -n 8 --pairs          # 8 clients, scripted fights
+python/.venv/bin/horizon-rl --config python/examples/fleet.toml --policy idle --seconds 600
+```
+
+Options (or keys of the TOML file, `FleetConfig` in `python/horizon_rl/fleet.py`): `server`, `n`,
+`names` (a format of `{i}`, default `Agent_{i}`), `pairs` (2k and 2k+1 are each other's
+opponent) or `target` (a format of `{i}`), `obs` (`state`; images come with M3), `frame_skip`,
+`render_distance` (2), `workers` (worker threads per client, 1), `stagger` (seconds between
+starts, 0.25), `hang_timeout` (5 s). It prints steps/s, the clients playing, late ticks, ended
+episodes and restarts every 10 s. Each client's files and log are under `--root` (default a new
+temp folder) in `NAME/`.
+
+From Python (what training uses until the Gymnasium env of M4):
+
+```python
+from horizon_rl.fleet import Fleet, FleetConfig
+
+with Fleet(FleetConfig(server="HOST:PORT", n=8, pairs=True)) as fleet:
+    fleet.start()                                   # staggered starts, waits for every session
+    states, infos = fleet.reset()                   # (n, L) float32; all alive
+    while True:
+        actions = [(buttons, hotbar, yaw, pitch) for ...]   # one per slot
+        states, infos, terminated, truncated, active = fleet.step(actions)
+```
+
+- `active[i]` is False while slot `i` is between episodes (dead and respawning, reconnecting, or
+  restarting); its action is ignored and its row is zeros. Its next episode's first observation
+  comes with `infos[i]["episode_start"]`; resets are automatic.
+- `terminated[i]`: it died. `truncated[i]`: a fault cut the episode, named in
+  `infos[i]["reset_reason"]`: `crash (…)`, `hang` (no heartbeat for 5 s), `timeout` (no answer
+  to a step in 10 s), or `disconnected: <reason>` (the client joins again by itself, after 1, 2, 4
+  … 30 s). A crashed or hung process is restarted after 1, 2, 4 … 30 s. Other slots never notice.
+- Timing: a headless client waits up to 20 ms for an owed step and moves its tick by the wait
+  (`--rl-step-grace`), so N clients come to tick just after Python sends and a batch doesn't miss
+  anyone's tick. Measured: 40 clients fighting hold 20 Hz with no late ticks, with or without 10 ms
+  of inference per step ([design.md](design.md#m2-measurements)).
+
 ## Server
 
 The client speaks only Minecraft 26.3 (protocol 777). On Paper: a 26.3 build, or ViaVersion (plus
@@ -63,7 +103,10 @@ offline-mode world).
 ## Tests and benchmarks
 
 ```sh
+python/.venv/bin/python -m unittest discover -s python/tests -p "test_*.py"   # Python unit tests
 python/.venv/bin/python python/tests/e2e_duel.py         # M1 end to end: 2 clients on a local server
+python/.venv/bin/python python/tests/e2e_fleet.py        # M2: 4 fighting clients; kill, kick, hang, death
+python/.venv/bin/python python/bench/fleet.py --ns 2,8,16,32   # CPU, RSS, 20 Hz as N grows (--infer-ms 10)
 python/.venv/bin/python python/bench/transport.py        # binary socket vs the JSON control socket
 python3 python/bench/baseline.py . [--fleet 10]          # CPU and RSS per idle client
 cargo test -p horizon-rl-proto                           # the wire format
