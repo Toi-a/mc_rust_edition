@@ -583,3 +583,56 @@ What this says:
 - Frames of sibling clients were checked by eye (4 clients at K = 4, 128x128): terrain, plants
   and players draw as on the first client.
 
+**Step 5, RAM per client.** `horizon-ctl memory` on a build with `--features alloc-census` (the
+live heap by the startup step or thread that allocated it), a 64x64 image client and a state-only
+one, alone and at K = 8. What a client held and never used:
+
+| What | MB per client | Who held it | Now |
+|---|---|---|---|
+| GUI atlas pixels (`ui.atlas`) | 101 | state-only clients: no renderer ever uploads and compresses them | not loaded: a state-only client loads as a server does (`Options::draws_nothing`) |
+| Title panorama, decoded (`ui.panorama`) | 36 | every client: it waits for a title screen's first cube | one texel (`UiResources::no_title_panorama`) |
+| Baked block states, block models, sprite pixels, face visibility | ~85, once per process | state-only clients | not loaded (the server's load) |
+| Cleared mesh buffers (`stream.mesh`) | 17 | image clients: the meshing workers' pool, up to 16 MB | `HORIZON_MESH_POOL_BYTES`, the fleet sets 1 MB |
+
+And the shared atlas on the GPU, 96 MB (4096x6144): 31 MB of it is slots for images made at run
+time (256 maps, pack and world icons, the on-screen keyboard's text), 14 MB the GUI's textures,
+8 MB rows for glyphs, 31 MB packing slack; what the world draws (entities, items, particles,
+skins, trims, fonts) is ~22 MB. `HORIZON_LEAN_ATLAS=1` (`hud/slots.rs`; the fleet sets it without
+the HUD) keeps that part: the GUI's sprites keep their names and sizes on a transparent texel, the
+menus' slots are gone (their writers already allow for a missing slot), 16 map slots stay, the
+glyph rows shrink to 128, and the shelves start 2048 wide (sorted by height, they lose up to the
+tallest sprite's height times the width). Result: 2048x3968, 31 MB.
+
+**Compressing the atlas instead** (BC7, 4:1: 96 → 24 MB, or 31 → 8 MB on top of the lean atlas)
+was looked at and not built. The atlas is written at run time at arbitrary texel rectangles
+(animated items, glyphs, skins, trims, maps), which block compression would need aligned to 4x4
+blocks and encoded on the fly; nothing in the renderer uses compressed formats yet; BC7 needs an
+encoder dependency and seconds of encoding at each start (or a cache), and it is lossy on pixel
+art. Leaving out what is never drawn gives 3:1 exactly, for ~150 lines. On top of the lean atlas,
+compression would save 23 MB per process: 3 MB per client at K = 8.
+
+Same bench as above (N = 16 unless said), before → after:
+
+| obs | K | client CPU % | RSS MB | PSS MB | GPU MB | steps/s | late ticks |
+|---|---|---|---|---|---|---|---|
+| state | 1 | 1.06 | 394 → 174 | 345 → 125 | – | 20.0 | 0 |
+| state (N = 32) | 8 | 1.15 | 157 → 48 | 152 → 44 | – | 20.0 | 0 |
+| state (N = 64) | 8 | 1.72 | 159 → 52 | 154 → 47 | – | 20.0 | 0 |
+| image 64x64 | 1 | 2.75 | 546 → 561 | 389 → 367 | 157 → 87 | 20.0 | 0 |
+| image 64x64 | 8 | 2.68 | 169 → 132 | 145 → 104 | 44 → 31 | 20.0 | 0 |
+| image 64x64 (N = 32) | 8 | 3.18 | 172 → 130 | 146 → 101 | 42 → 31 | 20.0 | 0 |
+
+What this says:
+
+- **A state-only client takes a third of the RAM it did**: 64 of them at K = 8 fit in 3 GB
+  (10 GB before). By RAM this desktop now holds several hundred.
+- **An image client at K = 8 takes ~100 MB of RAM and 31 MB of GPU memory**: ~200 by RAM, ~250 by
+  the 8 GB card. At K = 1 the GPU share falls most (157 → 87 MB: the atlas is per process there).
+- **What is left per client** (census, K = 8): the game's own models and tables (~3.4 MB), the
+  network thread's buffers (~3.3 MB), its thread and chunks (~6 MB); with images the renderer's
+  buffers (terrain arena 12 MB, upload staging 5.5 MB, HUD vertices, indices) and the driver's
+  host-side memory. Per process: baked block states 34 MB, face visibility 13 MB, registries.
+- At K = 1 an image client's resident heap is well above its live data (the panorama's 36 MB
+  left the census, but PSS fell by ~20): what loading freed (the atlas's pixels, decoded PNGs) leaves holes the allocator can't return
+  (`release_free_memory` after loading changed nothing).
+

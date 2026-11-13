@@ -123,6 +123,7 @@ impl Game<'_> {
         if !(self.options.headless && self.options.render) || self.renderer.is_some() {
             return;
         }
+        self.gui.no_title_panorama();
         match self.renderer_for(
             None::<std::sync::Arc<winit::window::Window>>,
             &self.pack,
@@ -138,6 +139,14 @@ impl Game<'_> {
             }
             Err(e) => log::error!("Headless renderer: {e}; no frames will be drawn"),
         }
+    }
+}
+
+impl super::super::super::UiResources {
+    /// A headless game opens no title screen: its panorama becomes one texel, instead of
+    /// six decoded faces (36 MB) waiting for the first title screen to take them.
+    pub(in super::super::super) fn no_title_panorama(&mut self) {
+        self.panorama = std::sync::Arc::new(horizon_client::gfx::panorama::Faces::colour([0; 4]));
     }
 }
 

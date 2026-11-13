@@ -189,6 +189,12 @@ class Fleet:
             # the default ~30 MB (it grows on demand) (gfx/arena.rs).
             env["HORIZON_SECTION_ARENA_VERTICES"] = os.environ.get("HORIZON_SECTION_ARENA_VERTICES",
                                                                    str(1 << 18))
+            # The meshing workers keep 1 MB of cleared mesh buffers, not 16 (streaming/mesh_pool.rs).
+            env["HORIZON_MESH_POOL_BYTES"] = os.environ.get("HORIZON_MESH_POOL_BYTES", str(1 << 20))
+            # Without the HUD nothing of the GUI is drawn: its textures and the menus' slots stay
+            # out of the atlas, 31 MiB of GPU memory instead of 96 (hud/slots.rs).
+            if not c.hud:
+                env["HORIZON_LEAN_ATLAS"] = os.environ.get("HORIZON_LEAN_ATLAS", "1")
             render_options = RENDER_OPTIONS
         peers = [(s.name, c.target_of(s.index)) for s in group[1:]]
         proc = ClientProcess(c.server, slot.name, self.root, render_distance=c.render_distance,

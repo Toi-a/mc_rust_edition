@@ -13032,7 +13032,7 @@ pub fn run_with() -> Result<()> {
         &early_settings,
         started,
         false,
-        options.dedicated.is_some(),
+        options.draws_nothing(),
         &Progress::new(),
         &mut |_, _| {},
     )?;

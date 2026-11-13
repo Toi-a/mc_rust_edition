@@ -79,9 +79,16 @@ with HorizonClient("/tmp/agent1.sock") as env:
   anyway.
 - `HORIZON_SECTION_ARENA_VERTICES` (the fleet sets 262144) sizes the terrain buffer's first page
   for a small view: ~7.5 MB of GPU memory instead of ~30 MB; it grows when needed.
+- `HORIZON_LEAN_ATLAS=1` (the fleet sets it unless `--hud`) leaves the GUI's textures and the
+  menus' slots out of the entity/item/GUI atlas: 31 MB of GPU memory instead of 96. Every sprite
+  keeps its name; those left out draw nothing. At most 16 maps (in frames or hands) draw at once.
+- `HORIZON_MESH_POOL_BYTES` (the fleet sets 1 MB) caps the cleared mesh buffers the meshing
+  workers keep (16 MB by default).
 - With several clients per process (`--per-process K`), they share the first client's textures
   (block textures, and the entity/item/GUI atlas unless `--hud`): an image client then takes
-  ~42 MB of GPU memory instead of ~170 MB ([design](design.md#m5-measurements)).
+  ~31 MB of GPU memory instead of ~87 MB ([design](design.md#m5-measurements)).
+- A state-only client loads as a server does: no models, no texture pixels, of the GUI only the
+  font's metrics. It takes ~125 MB of RAM alone and ~45 MB at `--per-process 8`.
 
 ## Run a fleet
 

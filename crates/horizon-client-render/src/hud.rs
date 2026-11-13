@@ -15,6 +15,7 @@ use wgpu::util::DeviceExt;
 pub mod cit_glint;
 mod pack_text;
 pub mod pictures;
+mod slots;
 pub(crate) mod sprite_modifiers;
 
 /// A sprite's atlas region, and its size in GUI pixels: the size of the
@@ -900,53 +901,6 @@ impl HudAtlas {
         ));
         Ok(atlas)
     }
-    /// Empty slots written at run time: map textures (game/maps.rs), the
-    /// minimap, a native mod's own image, downloaded skins, world and pack
-    /// icons and the on-screen keyboard's text. Their pixels are already zero
-    /// in the destination atlas, so keep the source buffers empty and avoid
-    /// duplicating the atlas-sized allocation during packing.
-    fn slots(images: &mut Vec<PackedImage>, trim: (u32, u32), mod_image: bool) {
-        for i in 0..MAP_SLOTS {
-            let name = map_slot_sprite(i).unwrap_or_default();
-            images.push((name.into(), 128, 128, Vec::new()));
-        }
-        // The minimap extra's image (game/extras.rs).
-        images.push((
-            MINIMAP_SPRITE.into(),
-            crate::minimap::SIZE as u32,
-            crate::minimap::SIZE as u32,
-            Vec::new(),
-        ));
-        // A mod's own image (native `mod_image`), only when a mod is loaded.
-        if mod_image {
-            images.push((
-                MOD_IMAGE_SPRITE.into(),
-                MOD_IMAGE_SIZE,
-                MOD_IMAGE_SIZE,
-                Vec::new(),
-            ));
-        }
-        // Downloaded skins (game/scoreboard.rs).
-        for i in 0..SKIN_SLOTS {
-            images.push((format!("horizon/skin{i}"), 64, 64, Vec::new()));
-        }
-        for i in 0..TRIM_SLOTS {
-            images.push((format!("horizon/trim{i}"), trim.0, trim.1, Vec::new()));
-        }
-        for i in 0..WORLD_ICON_SLOTS {
-            images.push((format!("horizon/world-icon{i}"), 64, 64, Vec::new()));
-        }
-        for i in 0..PACK_ICON_SLOTS {
-            images.push((
-                format!("horizon/pack-icon{i}"),
-                PACK_ICON_SIZE,
-                PACK_ICON_SIZE,
-                Vec::new(),
-            ));
-        }
-        // The on-screen keyboard's text and corner masks (ui_theme), rasterized at run time.
-        images.push(("horizon/ui-text".into(), 2048, 1024, Vec::new()));
-    }
     /// Only the font's metrics, for a game that draws nothing (the
     /// integrated or dedicated server): text measures as with the full atlas,
     /// without packing textures or rasterizing glyphs.
@@ -1086,7 +1040,7 @@ impl HudAtlas {
     /// room: a pack of thousands of mixed sizes (server packs with custom
     /// items) fits where the shelves' ragged ends would not.
     fn layout(images: &[PackedImage], max: u32) -> Result<(u32, Vec<(u32, u32)>, u32)> {
-        let mut width = 4096.min(max);
+        let mut width = slots::first_width().min(max);
         loop {
             let wide_enough = images.iter().all(|i| i.1 < width);
             if wide_enough {
@@ -1445,6 +1399,7 @@ impl HudAtlas {
         // Blurred sprites are sampled linearly in the atlas (screen.wgsl): a
         // border wrapped from their own edges keeps the filter off their
         // neighbours, as repeat addressing of their own texture would.
+        let undrawn = slots::take_undrawn(&mut images, full && slots::lean());
         let mut bordered = std::collections::HashSet::new();
         for image in &mut images {
             if flags.get(&image.0).is_some_and(|f: &TextureFlags| f.blur) {
@@ -1460,9 +1415,7 @@ impl HudAtlas {
         images.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)));
         let (width, placements, glyph_region) =
             Self::layout_leaving_out(&mut images, &mut animated, &cit_names, MAX_ATLAS_SIZE)?;
-        // A multiple of 1024 rather than a power of two: the default resources
-        // need 4096x5120 (8192 rows before), Faithful 32x 4096x12288 (16384).
-        let height = (glyph_region + GLYPH_ROWS).next_multiple_of(1024);
+        let height = slots::height(glyph_region);
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         let mut sprites = HashMap::new();
         let mut translucent = HashSet::new();
@@ -1555,6 +1508,7 @@ impl HudAtlas {
             crate::paged_maps::build((width, height), &mapped, MAX_ATLAS_SIZE)
         };
         let white = sprites["horizon/white"];
+        slots::name_undrawn(&mut sprites, undrawn, &gui_sizes);
         let glint = Self::glint_texture(root, defaults, "enchanted_glint_item");
         let glint_armor = Self::glint_texture(root, defaults, "enchanted_glint_armor");
         let font = crate::font::Font::load_over(

@@ -355,31 +355,8 @@ struct Shared {
     meshes: Mutex<MeshPool>,
     aborted: std::sync::atomic::AtomicBool,
 }
-#[derive(Default)]
-struct MeshPool {
-    meshes: Vec<SectionMesh>,
-    bytes: usize,
-}
-impl MeshPool {
-    const BYTES: usize = 16 << 20;
-    const COUNT: usize = 128;
-    fn take(&mut self) -> SectionMesh {
-        let mesh = self.meshes.pop().unwrap_or_default();
-        self.bytes -= mesh.capacity_bytes();
-        mesh
-    }
-    /// A rejected mesh is dropped by the caller, after releasing the lock.
-    fn put(&mut self, mut mesh: SectionMesh) -> Option<SectionMesh> {
-        let bytes = mesh.capacity_bytes();
-        if bytes == 0 || self.meshes.len() == Self::COUNT || bytes > Self::BYTES - self.bytes {
-            return Some(mesh);
-        }
-        mesh.clear();
-        self.bytes += bytes;
-        self.meshes.push(mesh);
-        None
-    }
-}
+mod mesh_pool;
+use mesh_pool::MeshPool;
 
 /// The chunks `wanted` in the order they decorate: by rank, lowest first. No
 /// two share a rank, so only the chunks without one yet need their distance:

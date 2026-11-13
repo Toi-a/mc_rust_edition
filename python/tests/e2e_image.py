@@ -32,8 +32,13 @@ def check(cond, what):
 
 
 def image_client(server, name, root, extra=()):
+    # As the fleet starts them: without the HUD, the atlas holds only what the world draws (the
+    # opponent seen below is drawn from it).
+    env = {"HORIZON_SUBMIT_THREAD": "0"}
+    if "--rl-hud" not in extra:
+        env["HORIZON_LEAN_ATLAS"] = "1"
     return ClientProcess(server.address, name, root, extra=["--rl-image", f"{W}x{H}", *extra],
-                         render_options=RENDER_OPTIONS, env={"HORIZON_SUBMIT_THREAD": "0"})
+                         render_options=RENDER_OPTIONS, env=env)
 
 
 def sky_band(frame):

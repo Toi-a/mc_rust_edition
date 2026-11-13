@@ -151,7 +151,12 @@ impl Game<'_> {
         rl.socket = peer.socket;
         rl.shm = peer.shm;
         rl.target = peer.target;
-        let gui = UiResources::load(&options.resources, vanilla_root)?;
+        // Without a renderer it draws nothing: the font's metrics are all it reads of the GUI.
+        let mut gui = match self.renderer.is_some() {
+            true => UiResources::load(&options.resources, vanilla_root)?,
+            false => UiResources::server(&options.resources)?,
+        };
+        gui.no_title_panorama();
         let renderer = match self.renderer.is_some() {
             true => {
                 // Built from the same packs as the first client's: its read-only textures

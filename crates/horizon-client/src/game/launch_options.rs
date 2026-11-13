@@ -85,6 +85,12 @@ pub(super) struct Options {
 }
 
 impl Options {
+    /// Whether this game draws nothing, ever: a dedicated server, and an RL client without
+    /// images (`--headless` without `--render`). Such a game loads no models, no sprite
+    /// pixels and only the font of the GUI atlas (docs/rl/design.md, "M5 measurements").
+    pub(super) fn draws_nothing(&self) -> bool {
+        self.dedicated.is_some() || (self.rl.is_some() && self.headless && !self.render)
+    }
     /// The name to join servers with: the one given, else the offline name kept
     /// next to options.txt (created on first use).
     pub(super) fn player_name(&self) -> String {
