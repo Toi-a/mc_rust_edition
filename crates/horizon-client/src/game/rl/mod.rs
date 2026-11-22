@@ -62,6 +62,8 @@ pub(in super::super) struct RlOptions {
     /// `--rl-target-health`: the server shows its players each other's health, so the
     /// observation has the target's health and absorption ([`fair_play`]).
     pub target_health: bool,
+    /// `--rl-hotbar N`: the hotbar slot (1..9) the client holds at each login (1 when unset).
+    pub hotbar: Option<u8>,
     /// `--rl-client`: more clients in this process ([`shard`]).
     pub peers: Vec<Peer>,
 }
@@ -147,6 +149,8 @@ pub(super) struct Session {
     idle_tick: Instant,
     backoff: reconnect::Backoff,
     was_connected: bool,
+    /// This connection's player holds `--rl-hotbar`'s slot already.
+    slot_picked: bool,
     disconnects: u32,
     reconnects: u32,
     /// The waiting for steps still allowed (see [`STEP_GRACE`]).
@@ -202,6 +206,7 @@ impl Session {
             idle_tick: Instant::now(),
             backoff: reconnect::Backoff::default(),
             was_connected: false,
+            slot_picked: false,
             disconnects: 0,
             reconnects: 0,
             shift_budget: SHIFT_SAVED,
@@ -650,6 +655,7 @@ impl Game<'_> {
         let Some(mut s) = self.agent.rl.take() else {
             return;
         };
+        self.rl_pick_login_slot(&mut s);
         if let Some(step) = s.pending.take() {
             let frame_skip = if step.frame_skip == 0 {
                 s.frame_skip
@@ -663,6 +669,18 @@ impl Game<'_> {
             s.signals.late += 1;
         }
         self.agent.rl = Some(s);
+    }
+
+    /// At login the server chooses the slot (`SetHeldSlot`, sent before the first teleport makes
+    /// the player); once the player is there, the client holds `--rl-hotbar`'s instead, and the
+    /// tick tells the server (`SetCarriedItem`). Once per connection: a step may change it after.
+    fn rl_pick_login_slot(&mut self, s: &mut Session) {
+        if self.remote.is_none() {
+            s.slot_picked = false;
+        } else if !s.slot_picked && self.player.is_some() {
+            self.selected = usize::from(s.options.hotbar.unwrap_or(1).clamp(1, 9)) - 1;
+            s.slot_picked = true;
+        }
     }
 
     /// After each client tick: the tick's signals, and the observation when a step is done.
