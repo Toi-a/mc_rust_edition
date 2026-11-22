@@ -62,8 +62,8 @@ pub(in super::super) struct RlOptions {
     /// `--rl-target-health`: the server shows its players each other's health, so the
     /// observation has the target's health and absorption ([`fair_play`]).
     pub target_health: bool,
-    /// `--rl-hotbar N`: the hotbar slot (1..9) the client holds at each login (1 when unset).
-    pub hotbar: Option<u8>,
+    /// `--rl-login-slot N`: the hotbar slot (1..9) the client holds at each login (1 when unset).
+    pub login_slot: Option<u8>,
     /// `--rl-client`: more clients in this process ([`shard`]).
     pub peers: Vec<Peer>,
 }
@@ -149,8 +149,10 @@ pub(super) struct Session {
     idle_tick: Instant,
     backoff: reconnect::Backoff,
     was_connected: bool,
-    /// This connection's player holds `--rl-hotbar`'s slot already.
+    /// This connection's player holds `--rl-login-slot`'s slot already.
     slot_picked: bool,
+    /// Pre-tick hooks run with this connection's player there, before the pick.
+    slot_ticks: u8,
     disconnects: u32,
     reconnects: u32,
     /// The waiting for steps still allowed (see [`STEP_GRACE`]).
@@ -207,6 +209,7 @@ impl Session {
             backoff: reconnect::Backoff::default(),
             was_connected: false,
             slot_picked: false,
+            slot_ticks: 0,
             disconnects: 0,
             reconnects: 0,
             shift_budget: SHIFT_SAVED,
@@ -672,14 +675,23 @@ impl Game<'_> {
     }
 
     /// At login the server chooses the slot (`SetHeldSlot`, sent before the first teleport makes
-    /// the player); once the player is there, the client holds `--rl-hotbar`'s instead, and the
-    /// tick tells the server (`SetCarriedItem`). Once per connection: a step may change it after.
+    /// the player); the client then holds `--rl-login-slot`'s instead, and the tick tells the
+    /// server (`SetCarriedItem`). Once per connection: a step may change it after.
+    ///
+    /// It waits one tick with the player there, so that tick has answered the server's slot
+    /// first: the slot last sent may be the login slot already (the first tick sends the default
+    /// 0 before `SetHeldSlot` arrives), and picking it back before the answer would send nothing,
+    /// leaving the server on the slot it remembered.
     fn rl_pick_login_slot(&mut self, s: &mut Session) {
-        if self.remote.is_none() {
-            s.slot_picked = false;
-        } else if !s.slot_picked && self.player.is_some() {
-            self.selected = usize::from(s.options.hotbar.unwrap_or(1).clamp(1, 9)) - 1;
-            s.slot_picked = true;
+        if self.remote.is_none() || self.player.is_none() {
+            s.slot_picked = self.remote.is_some() && s.slot_picked;
+            s.slot_ticks = 0;
+        } else if !s.slot_picked {
+            s.slot_ticks += 1;
+            if s.slot_ticks > 1 {
+                self.selected = usize::from(s.options.login_slot.unwrap_or(1).clamp(1, 9)) - 1;
+                s.slot_picked = true;
+            }
         }
     }
 

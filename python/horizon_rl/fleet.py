@@ -43,11 +43,12 @@ RESTART_STABLE = 60.0
 
 @dataclasses.dataclass
 class FleetConfig:
-    """One run's clients. `names` and `target` are format strings of the slot index `i`;
+    """One run's clients. `names` and `target` are format strings of the slot index `i` (from 0)
+    and of `n` (`i + 1`, for servers that number their players from 1);
     `pairs` makes slots 2k and 2k+1 each other's target (it overrides `target`)."""
     server: str
     n: int = 2
-    names: str = "Agent_{i}"
+    names: str = "Agent_{n}"
     target: str = ""
     pairs: bool = False
     obs: str = "state"
@@ -58,8 +59,8 @@ class FleetConfig:
     # state then has the opponent's health and absorption (`--rl-target-health`).
     target_health: bool = False
     # The hotbar slot (1..9) every client holds at each login, before any step picks another
-    # (`--rl-hotbar`).
-    hotbar: int = 1
+    # (`--rl-login-slot`). Not the env's `hotbar`, which says whether the policy picks slots.
+    login_slot: int = 1
     frame_skip: int = 1
     render_distance: int = 2
     # Worker threads per client (chunk streaming jobs). Headless needs few.
@@ -99,13 +100,13 @@ class FleetConfig:
         return self.obs in ("image", "both")
 
     def name(self, i):
-        return self.names.format(i=i)
+        return self.names.format(i=i, n=i + 1)
 
     def target_of(self, i):
         if self.pairs:
             partner = i ^ 1
             return self.name(partner) if partner < self.n else None
-        return self.target.format(i=i) or None
+        return self.target.format(i=i, n=i + 1) or None
 
 
 class Slot:
@@ -149,8 +150,8 @@ class Fleet:
         self.root.mkdir(parents=True, exist_ok=True)
         if config.clients_per_process < 1:
             raise ValueError("clients_per_process: at least 1")
-        if not 1 <= config.hotbar <= 9:
-            raise ValueError(f"hotbar {config.hotbar}: a slot 1..9")
+        if not 1 <= config.login_slot <= 9:
+            raise ValueError(f"login_slot {config.login_slot}: a slot 1..9")
         self.slots = [Slot(i, config.name(i)) for i in range(config.n)]
         k = config.clients_per_process
         # The slots of one process: its first starts it, the others are its `--rl-client`s.
@@ -179,7 +180,7 @@ class Fleet:
             extra += ["--rl-target", target]
         if c.target_health:
             extra.append("--rl-target-health")
-        extra += ["--rl-hotbar", str(c.hotbar)]
+        extra += ["--rl-login-slot", str(c.login_slot)]
         env = {"HORIZON_JOB_THREADS": str(c.workers), "HORIZON_WORKER_THREADS": str(c.workers)}
         render_options = None
         if c.images:

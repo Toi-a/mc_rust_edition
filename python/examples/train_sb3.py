@@ -52,6 +52,8 @@ def main():
     ap.add_argument("--load", help="a saved model to continue from (same stage)")
     ap.add_argument("--save", default="horizon_ppo", help="where the model is saved at the end")
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--login-slot", "--hotbar", type=int, default=1, dest="login_slot",
+                    help="the hotbar slot 1..9 each agent holds at login (the kit's sword: 1)")
     args = ap.parse_args()
     if not args.server and not args.local:
         ap.error("--server HOST:PORT or --local")
@@ -64,7 +66,7 @@ def main():
     try:
         env = HorizonVecEnv(server=server.address if server else args.server, n=args.n, pairs=True,
                             obs=args.obs, clients_per_process=args.per_process, flat=True,
-                            reward=rewards.duel, **STAGES[args.stage])
+                            reward=rewards.duel, login_slot=args.login_slot, **STAGES[args.stage])
         if server:
             for name in env.names:
                 server.command(f"give {name} minecraft:diamond_sword")

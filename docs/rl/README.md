@@ -98,7 +98,7 @@ python/.venv/bin/horizon-rl --config python/examples/fleet.toml --policy idle --
 ```
 
 Options (or keys of the TOML file, `FleetConfig` in `python/horizon_rl/fleet.py`): `server`, `n`,
-`names` (a format of `{i}`, default `Agent_{i}`), `pairs` (2k and 2k+1 are each other's
+`names` (a format of `{i}`, from 0, or `{n}`, from 1; default `Agent_{n}`), `pairs` (2k and 2k+1 are each other's
 opponent) or `target` (a format of `{i}`), `obs` (`state`, `image` or `both`: every mode returns
 the state vector; `image` and `both` add frames), `image_size` (`[64, 64]`), `hud` (false), `target_health` (false: the
 server shows players' health, so the opponent's is observed), `frame_skip`,

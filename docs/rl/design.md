@@ -136,8 +136,8 @@ packets, with nothing extra.
 | `use` | bool (held: shield, bow, food) |
 | `hotbar` | 0 = no change, 1..9 = select |
 
-At each login (the first join and every reconnect) the client holds the slot `--rl-hotbar N`
-names (`FleetConfig.hotbar`, default 1, the first), whatever slot the server remembered for the
+At each login (the first join and every reconnect) the client holds the slot `--rl-login-slot N`
+names (`FleetConfig.login_slot`, default 1, the first), whatever slot the server remembered for the
 player; a step's `hotbar` changes it from then on.
 | `look` | `[yaw, pitch]` in degrees, **absolute**: the direction to face from this tick on |
 

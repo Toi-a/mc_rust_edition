@@ -21,8 +21,8 @@ def parse(argv=None):
     p.add_argument("--config", help="a TOML (or .json) file of FleetConfig settings")
     p.add_argument("--server", help="HOST:PORT of the (offline-mode) server")
     p.add_argument("-n", type=int, help="number of clients")
-    p.add_argument("--names", help="player names, a format of {i} (default Agent_{i})")
-    p.add_argument("--target", help="each client's opponent, a format of {i}")
+    p.add_argument("--names", help="player names, a format of {i} (from 0) or {n} (from 1) (default Agent_{n})")
+    p.add_argument("--target", help="each client's opponent, a format of {i} or {n}")
     p.add_argument("--pairs", action="store_true", default=None,
                    help="clients 2k and 2k+1 are each other's opponent")
     p.add_argument("--obs", choices=["state", "image", "both"], help="observation mode")
@@ -30,7 +30,8 @@ def parse(argv=None):
     p.add_argument("--hud", action="store_true", default=None, help="draw the HUD in the frames")
     p.add_argument("--target-health", action="store_true", default=None,
                    help="the server shows players' health: observe the opponent's too")
-    p.add_argument("--hotbar", type=int, help="the hotbar slot 1..9 held at each login (default 1)")
+    p.add_argument("--login-slot", "--hotbar", type=int, dest="login_slot",
+                   help="the hotbar slot 1..9 held at each login (default 1)")
     p.add_argument("--frame-skip", type=int)
     p.add_argument("--render-distance", type=int)
     p.add_argument("--workers", type=int, help="worker threads per client")
@@ -56,7 +57,7 @@ def config_of(args):
     overrides = {"server": args.server, "n": args.n, "names": args.names, "target": args.target,
                  "pairs": args.pairs, "obs": args.obs, "frame_skip": args.frame_skip,
                  "image_size": image_size(args.image_size), "hud": args.hud, "target_health": args.target_health,
-                 "hotbar": args.hotbar,
+                 "login_slot": args.login_slot,
                  "render_distance": args.render_distance, "workers": args.workers, "clients_per_process": args.per_process,
                  "stagger": args.stagger, "root": args.root, "binary": args.binary,
                  "resources": args.resources}

@@ -13,6 +13,13 @@ class FleetConfigTest(unittest.TestCase):
         c = FleetConfig(server="h:1", n=5, names="Bot{i}", pairs=True)
         self.assertEqual([c.target_of(i) for i in range(5)], ["Bot1", "Bot0", "Bot3", "Bot2", None])
 
+    def test_default_names_count_from_one_in_the_servers_pairs(self):
+        # A server that numbers its players from 1 pairs Agent_1 with Agent_2, Agent_3 with Agent_4.
+        c = FleetConfig(server="h:1", n=4, pairs=True)
+        self.assertEqual([(c.name(i), c.target_of(i)) for i in range(4)],
+                         [("Agent_1", "Agent_2"), ("Agent_2", "Agent_1"),
+                          ("Agent_3", "Agent_4"), ("Agent_4", "Agent_3")])
+
     def test_a_target_pattern_names_each_opponent(self):
         c = FleetConfig(server="h:1", n=2, target="Rival_{i}")
         self.assertEqual(c.target_of(1), "Rival_1")

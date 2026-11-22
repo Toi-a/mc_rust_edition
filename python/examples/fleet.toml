@@ -2,7 +2,7 @@
 # Every key is a FleetConfig field (python/horizon_rl/fleet.py); command-line options override it.
 server = "192.168.1.50:25565"   # an offline-mode 26.3 server (Paper: connection-throttle -1)
 n = 8
-names = "Agent_{i}"
+names = "Agent_{n}"
 pairs = true                    # 2k and 2k+1 fight each other (or: target = "Rival_{i}")
 obs = "state"                   # or "image" / "both": grayscale frames of the view too
 image_size = [64, 64]           # width (a multiple of 4), height
