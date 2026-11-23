@@ -102,11 +102,20 @@ pub(super) struct Round {
     /// The session tick the running round started at; `None` between rounds.
     pub started: Option<u64>,
     pub max_ticks: u32,
+    /// The round the last episode began in (0: none on this connection), so one round is one
+    /// episode at most.
+    pub episode: u32,
     /// A start named an opponent other than `--rl-target` (warned once).
     pub warned_opponent: bool,
 }
 
 impl Round {
+    /// A round runs that no episode began in yet: a reset may end (`--rl-rounds`). At the first
+    /// reset of a connection that may be a round already under way.
+    pub(super) fn fresh(&self) -> bool {
+        self.started.is_some() && self.id != self.episode
+    }
+
     /// The share of the time cap left, 1 at the start down to 0; 1 throughout a round without a
     /// cap, 0 between rounds.
     pub(super) fn time_left(&self, now: u64) -> f32 {
@@ -276,6 +285,30 @@ mod tests {
             (1, 1, 2400.0)
         );
         assert_eq!(s.round_win + s.round_loss + s.round_draw + s.round_abort, 0);
+    }
+
+    #[test]
+    fn an_episode_begins_once_per_round() {
+        let (mut round, mut s) = (Round::default(), Signals::default());
+        assert!(!round.fresh(), "no round yet");
+        let start = |id| Message::Start {
+            round: id,
+            opponent: "Agent_2".into(),
+            max_ticks: 2400,
+        };
+        apply(&mut round, &mut s, None, 10, start(1));
+        assert!(round.fresh());
+        round.episode = round.id; // a reset ended in it
+        assert!(!round.fresh(), "the same round again");
+        let end = Message::End {
+            round: 1,
+            outcome: Outcome::Loss,
+            ticks: 300,
+        };
+        apply(&mut round, &mut s, None, 310, end);
+        assert!(!round.fresh(), "between rounds");
+        apply(&mut round, &mut s, None, 330, start(2));
+        assert!(round.fresh(), "the next round");
     }
 
     #[test]

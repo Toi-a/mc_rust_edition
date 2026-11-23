@@ -14,6 +14,11 @@ Stages (`STAGES` below; add your own):
 Agents 2k and 2k+1 are each other's opponent and all share one policy, so it plays itself. The
 reward is damage dealt minus damage taken. `--local` starts the repo's own offline server and
 hands out swords; on your server the kit does that.
+
+`--rounds`: the server's plugin runs 1v1 rounds (docs/rl/design.md#rounds-and-the-opponent-pool-m6-planned).
+An episode is then a round, the reward is `rewards.Round` (the result, plus a little per health
+point dealt and taken), and the policy also observes the round's time left. The local stand-in
+server has no rounds.
 """
 import argparse
 import sys
@@ -25,6 +30,7 @@ from stable_baselines3 import PPO  # noqa: E402
 from stable_baselines3.common.vec_env import VecMonitor  # noqa: E402
 
 from horizon_rl import HorizonVecEnv, rewards  # noqa: E402
+from horizon_rl.observations import PRESETS  # noqa: E402
 from horizon_rl.sb3 import HorizonSB3VecEnv, ReleaseKeys  # noqa: E402
 
 # The action settings of each stage (horizon_rl.actions.ActionCodec) and what it observes
@@ -37,6 +43,17 @@ STAGES = {
                 buttons=("forward", "back", "left", "right", "jump", "sprint", "attack")),
     "full": dict(camera="bins"),
 }
+
+
+def stage_settings(stage, rounds):
+    """A stage's env settings; with rounds the chosen observation also has the round's time left
+    (the whole state vector has it already)."""
+    settings = dict(STAGES[stage])
+    observation = settings.get("observation")
+    if rounds and observation is not None:
+        names = PRESETS[observation] if isinstance(observation, str) else observation
+        settings["observation"] = tuple(names) + ("round_time_left",)
+    return settings
 
 
 def main():
@@ -54,9 +71,12 @@ def main():
     ap.add_argument("--device", default="auto")
     ap.add_argument("--login-slot", "--hotbar", type=int, default=1, dest="login_slot",
                     help="the hotbar slot 1..9 each agent holds at login (the kit's sword: 1)")
+    ap.add_argument("--rounds", action="store_true", help="the server's plugin runs 1v1 rounds")
     args = ap.parse_args()
     if not args.server and not args.local:
         ap.error("--server HOST:PORT or --local")
+    if args.rounds and args.local:
+        ap.error("--rounds needs the round plugin: the local stand-in server has none")
 
     server = None
     if args.local:
@@ -66,7 +86,8 @@ def main():
     try:
         env = HorizonVecEnv(server=server.address if server else args.server, n=args.n, pairs=True,
                             obs=args.obs, clients_per_process=args.per_process, flat=True,
-                            reward=rewards.duel, login_slot=args.login_slot, **STAGES[args.stage])
+                            rounds=args.rounds, reward=rewards.Round() if args.rounds else rewards.duel,
+                            login_slot=args.login_slot, **stage_settings(args.stage, args.rounds))
         if server:
             for name in env.names:
                 server.command(f"give {name} minecraft:diamond_sword")

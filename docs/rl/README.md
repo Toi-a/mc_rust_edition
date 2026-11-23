@@ -210,6 +210,15 @@ stand-in server (`--server HOST:PORT` for a real one).
   `infos["episode_start"][i]`. **`infos["valid"][i]`** is True exactly when row `i` is a real
   transition (the agent acted on its previous observation and this is what followed): put only
   those rows in a replay buffer or rollout, and cut the trajectory at `episode_start`.
+- **Rounds** (`rounds=True`, a server whose plugin runs 1v1 rounds; [Server](#server)): an
+  episode is a round, for both agents of a pair. The round's end ends it: `terminated` for a win,
+  loss, draw or timeout, `truncated` with `reset_reason` `"abort"` when the opponent left. A
+  death alone ends nothing (the loser's death and the round's end come within a tick or two).
+  The reset then lasts until the next round starts: the respawn and the plugin's intermission,
+  about 0.5 s plus the respawn, with nothing pressed. `rewards.Round()` pays the result on the
+  round's last step (win +1, loss -1, draw 0, timeout -1, abort 0) plus +-0.01 per health point
+  dealt and taken on every step; every term is a keyword. The state's `round_time_left` is the
+  share of the round's time cap left.
 - **Policy updates**: the game doesn't wait while a trainer computes. Call `env.release()`
   before a pause of more than a tick or two (a PPO update): it lets go of every agent's keys, so
   they stand still instead of running on with their last action.
@@ -218,7 +227,8 @@ stand-in server (`--server HOST:PORT` for a real one).
   `ReleaseKeys()` the callback that calls `release()` after each rollout.
   `python/examples/train_sb3.py --local -n 4 --steps 20000` trains PPO in self-play (agents in
   pairs, one shared policy), in stages: `--stage sword` (forward, back, jump, attack, aim
-  assist), `aim` (plus strafing and sprint, camera by bins), `full`. SB3 can't skip rows, so the
+  assist), `aim` (plus strafing and sprint, camera by bins), `full`; `--rounds` on a server with
+  the round plugin (episodes are rounds, `rewards.Round`, and the time left is observed). SB3 can't skip rows, so the
   ~20 steps an agent waits for its respawn are stored as steps of its next episode with reward
   0 (`info["valid"]` False).
 - **PettingZoo** (optional, `pip install pettingzoo`): `horizon_rl.parallel.HorizonParallelEnv`
@@ -297,7 +307,15 @@ ViaBackwards for a newer server). Set `online-mode=false`, and in `bukkit.yml`
 `settings.connection-throttle: -1` so many clients from one address may join.
 
 Locally, the repo's own dedicated server stands in (`horizon_rl.local.LocalServer`: a flat,
-offline-mode world).
+offline-mode world). It has no rounds.
+
+Rounds come from the training server's plugin over the plugin channel `horizon_rl:round` (the
+messages: [design.md](design.md#rounds-and-the-opponent-pool-m6-planned)). The client announces the
+channel at each login and reports the messages in `info` (`round`, `in_round`, `round_start`,
+`round_end`, `round_win`, `round_loss`, `round_draw`, `round_timeout`, `round_abort`,
+`round_ticks`) whether or not the run uses rounds; `rounds=True` (`--rl-rounds`) makes them the
+episodes. The plugin keeps death messages out of the chat, so `kills_total` stays 0 there: count
+`round_win`.
 
 ## Tests and benchmarks
 

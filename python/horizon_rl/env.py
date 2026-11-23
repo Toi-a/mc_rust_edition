@@ -11,6 +11,8 @@ unless `normalize=False` (`horizon_rl.observations`; `env.observation_fields` sa
 
 The server runs in real time, so nothing here blocks on one agent: an agent whose episode ended
 (a death, or a fault: kick, crash, hang) is reset by its supervisor while the others play on.
+With `rounds=True` (a server whose plugin runs 1v1 rounds) an episode is a round instead: see
+`horizon_rl.fleet`, and `rewards.Round` for its reward.
 """
 import dataclasses
 

@@ -15,6 +15,10 @@ resources and one GPU device for K clients); a fault in any of them restarts the
   of the following steps (`active` False) until it is back alive, then its first observation comes
   with `info["episode_start"] = True`. A fault while it was between episodes (no step to truncate)
   is named in that first info's `reset_reason`.
+- With `rounds` (a server whose plugin runs 1v1 rounds, docs/rl/design.md#rounds-and-the-opponent-pool-m6-planned)
+  an episode is a round instead: the round's end ends it (`terminated` for a win, loss, draw or
+  timeout; `truncated` with `reset_reason` `abort` when the opponent left), a death alone doesn't,
+  and the reset waits until the next round starts (`--rl-rounds`).
 """
 import dataclasses
 import json
@@ -61,6 +65,8 @@ class FleetConfig:
     # The hotbar slot (1..9) every client holds at each login, before any step picks another
     # (`--rl-login-slot`). Not the env's `hotbar`, which says whether the policy picks slots.
     login_slot: int = 1
+    # The server runs 1v1 rounds (its plugin's `horizon_rl:round`): an episode is a round.
+    rounds: bool = False
     frame_skip: int = 1
     render_distance: int = 2
     # Worker threads per client (chunk streaming jobs). Headless needs few.
@@ -181,6 +187,8 @@ class Fleet:
         if c.target_health:
             extra.append("--rl-target-health")
         extra += ["--rl-login-slot", str(c.login_slot)]
+        if c.rounds:
+            extra.append("--rl-rounds")
         env = {"HORIZON_JOB_THREADS": str(c.workers), "HORIZON_WORKER_THREADS": str(c.workers)}
         render_options = None
         if c.images:
@@ -385,8 +393,10 @@ class Fleet:
         deadline = now + timeout
         while any(s.state != "ready" for s in self.slots):
             if time.monotonic() > deadline:
+                hint = (" (with rounds: is the round plugin on the server, and every agent's "
+                        "opponent online?)") if self.config.rounds else ""
                 raise TimeoutError("not all slots came back: " + ", ".join(
-                    f"{s.name}={s.state}" for s in self.slots if s.state != "ready"))
+                    f"{s.name}={s.state}" for s in self.slots if s.state != "ready") + hint)
             self._pump(0.05)
             now = time.monotonic()
             for slot in self.slots:
@@ -457,12 +467,12 @@ class Fleet:
                 continue
             states[i], info = slot.last
             infos[i] = info
-            if info.get("died", 0) > 0:
-                terminated[i] = True
-            elif info.get("disconnected", 0) > 0 or info.get("connected", 1) == 0:
-                truncated[i] = True
-                info["reset_reason"] = slot.reason or "disconnected"
+            terminated[i], truncated[i], reason = episode_end(info, self.config.rounds)
+            if reason == "disconnected":
+                info["reset_reason"] = slot.reason or reason
                 slot.reason = None
+            elif reason:
+                info["reset_reason"] = reason
             if terminated[i] or truncated[i]:
                 self._begin_reset(slot, now)
         if self.frames is not None:
@@ -495,6 +505,21 @@ class Fleet:
 
     def __exit__(self, *exc):
         self.close()
+
+
+def episode_end(info, rounds):
+    """Whether a step's `info` ends the episode: `(terminated, truncated, reset_reason or None)`.
+    Without rounds a death ends it; with rounds the round's end does (an abort truncates). A lost
+    connection truncates it either way."""
+    if rounds and info.get("round_end", 0) > 0:
+        if info.get("round_abort", 0) > 0:
+            return False, True, "abort"
+        return True, False, None
+    if not rounds and info.get("died", 0) > 0:
+        return True, False, None
+    if info.get("disconnected", 0) > 0 or info.get("connected", 1) == 0:
+        return False, True, "disconnected"
+    return False, False, None
 
 
 def nan_action():

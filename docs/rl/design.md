@@ -244,7 +244,7 @@ These are signals only. Python builds the reward.
 | `ticks_elapsed`, `late_ticks`, `tick_overrun_ms` | timing (above) |
 | `round`, `in_round`, `round_start`, `round_end`, `round_win`, `round_loss`, `round_draw`, `round_timeout`, `round_abort`, `round_ticks` | the plugin's round messages (`game/rl/round.rs`): the last round started or ended, whether one runs, this step's start and end with its result, and the ended round's length in server ticks |
 
-Episodes: `terminated = True` when the agent dies. The next `reset()` returns the observation after
+Episodes: `terminated = True` when the agent dies (with rounds: when the round ends, below). The next `reset()` returns the observation after
 respawn. A kick, disconnect or crash gives `truncated = True` with `info["reset_reason"]`, and the
 supervisor reconnects or restarts the instance with backoff.
 

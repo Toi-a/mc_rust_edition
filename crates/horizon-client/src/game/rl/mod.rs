@@ -65,6 +65,9 @@ pub(in super::super) struct RlOptions {
     pub target_health: bool,
     /// `--rl-login-slot N`: the hotbar slot (1..9) the client holds at each login (1 when unset).
     pub login_slot: Option<u8>,
+    /// `--rl-rounds`: the server runs rounds ([`round`]), and an episode is one: a reset ends
+    /// when a round this client had no episode of is running, not at the respawn.
+    pub rounds: bool,
     /// `--rl-client`: more clients in this process ([`shard`]).
     pub peers: Vec<Peer>,
 }
@@ -582,8 +585,10 @@ impl Game<'_> {
         if s.was_connected && !connected {
             s.disconnects += 1;
             s.signals.disconnected += 1;
-            // A round doesn't outlive the connection: the next one starts with a new message.
+            // A round doesn't outlive the connection: the next one starts with a new message, and
+            // a new server may count its rounds from 1 again.
             s.round.started = None;
+            s.round.episode = 0;
             let reason = off.clone().unwrap_or_default();
             log::info!("RL: disconnected: {reason}");
             s.send(
@@ -755,9 +760,11 @@ impl Game<'_> {
         }
         s.own_health = health;
         self.rl_track_target(&mut s);
-        // A reset ends on a tick once the player is alive, so the next step starts on the next.
-        if s.reset && alive {
+        // A reset ends on a tick once the player is alive (with rounds: in a new round), so the
+        // next step starts on the next.
+        if s.reset && alive && (!s.options.rounds || s.round.fresh()) {
             s.reset = false;
+            s.round.episode = s.round.id;
             s.signals = Signals::default();
             s.signals.ticks = 1;
             self.rl_observe(&mut s, 0);
