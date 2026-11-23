@@ -24,6 +24,7 @@
 mod fair_play;
 mod image;
 mod reconnect;
+mod round;
 mod shard;
 
 pub(in super::super) use image::parse_image_size;
@@ -105,6 +106,16 @@ struct Signals {
     died: u32,
     respawned: u32,
     disconnected: u32,
+    /// Round messages from the server's plugin (`round.rs`).
+    round_start: u32,
+    round_end: u32,
+    round_win: u32,
+    round_loss: u32,
+    round_draw: u32,
+    round_timeout: u32,
+    round_abort: u32,
+    /// The length in server ticks of the round that ended this step.
+    round_ticks: f32,
 }
 
 struct Conn {
@@ -159,6 +170,8 @@ pub(super) struct Session {
     shift_budget: Duration,
     /// Image observations, with `--rl-image`.
     frames: Option<image::Frames>,
+    /// The server's round this client is in.
+    round: round::Round,
 }
 
 impl Session {
@@ -214,6 +227,7 @@ impl Session {
             reconnects: 0,
             shift_budget: SHIFT_SAVED,
             frames: options.image.map(image::Frames::new),
+            round: round::Round::default(),
             options,
         })
     }
@@ -268,6 +282,19 @@ impl Session {
         put("disconnected", s.disconnected as f32);
         put("disconnects_total", self.disconnects as f32);
         put("reconnects_total", self.reconnects as f32);
+        put("round", self.round.id as f32);
+        put(
+            "in_round",
+            f32::from(u8::from(self.round.started.is_some())),
+        );
+        put("round_start", s.round_start as f32);
+        put("round_end", s.round_end as f32);
+        put("round_win", s.round_win as f32);
+        put("round_loss", s.round_loss as f32);
+        put("round_draw", s.round_draw as f32);
+        put("round_timeout", s.round_timeout as f32);
+        put("round_abort", s.round_abort as f32);
+        put("round_ticks", s.round_ticks);
         let frames = self.frames.as_ref();
         put(
             "frame_fresh",
@@ -555,6 +582,8 @@ impl Game<'_> {
         if s.was_connected && !connected {
             s.disconnects += 1;
             s.signals.disconnected += 1;
+            // A round doesn't outlive the connection: the next one starts with a new message.
+            s.round.started = None;
             let reason = off.clone().unwrap_or_default();
             log::info!("RL: disconnected: {reason}");
             s.send(
@@ -842,6 +871,7 @@ impl Game<'_> {
         let offhand = stack(&self.offhand);
         let armor_items = std::array::from_fn(|i| stack(&self.armor[i]).0);
         let (selected, yaw, pitch) = (self.selected, self.yaw, self.pitch);
+        let round_time_left = s.round.time_left(s.ticks);
         let Some(p) = self.player.as_mut() else {
             return SelfView::default();
         };
@@ -869,6 +899,7 @@ impl Game<'_> {
             sneaking,
             using_item: using,
             hurt_time: p.health.hurt_animation_time,
+            round_time_left,
         }
     }
 

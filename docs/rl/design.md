@@ -242,6 +242,7 @@ These are signals only. Python builds the reward.
 | `respawned` | `ClientboundRespawn`. After death the client presses Respawn automatically (the button a human clicks) |
 | `connected`, `disconnected`, `disconnects_total`, `reconnects_total` | the connection and the reconnect loop; the reason comes in a `NOTE` |
 | `ticks_elapsed`, `late_ticks`, `tick_overrun_ms` | timing (above) |
+| `round`, `in_round`, `round_start`, `round_end`, `round_win`, `round_loss`, `round_draw`, `round_timeout`, `round_abort`, `round_ticks` | the plugin's round messages (`game/rl/round.rs`): the last round started or ended, whether one runs, this step's start and end with its result, and the ended round's length in server ticks |
 
 Episodes: `terminated = True` when the agent dies. The next `reset()` returns the observation after
 respawn. A kick, disconnect or crash gives `truncated = True` with `info["reset_reason"]`, and the
@@ -320,6 +321,115 @@ or the `horizon-rl` command.
   vector env. The server does the matchmaking, so agents don't interact through the env.
 - `examples/random_agent.py` and `bench/throughput.py` (steps/s per instance and in total, CPU %
   and RSS per instance as N grows, max N that holds 20 Hz).
+
+## Rounds and the opponent pool (M6, planned)
+
+Decided 2026-11-23. Two changes, in this order: fights become real 1v1 **rounds** that the server
+runs, and the trained policy (the **learner**) fights frozen **past versions of itself** drawn from
+a pool, not its current self. Without rounds there is no clean point to swap an opponent or to
+count a win, so rounds come first.
+
+### Rounds (server: the Paper plugin)
+
+The plugin's round manager does this. The prompt for it is `~/Projects/horizon-rl-round-manager-prompt.md`.
+- **Round end:**
+  - A death: the dead agent loses whatever killed it. Two deaths on the same tick are a draw.
+  - The time cap, 2 minutes: result `timeout`.
+  - An agent leaving: `abort` for the other.
+- **The reset after a round end:** both agents are reset (health, food, effects, kit, position),
+  frozen, and released on the same server tick. That happens at least 10 ticks (0.5 s) after the
+  end, and at least 2 ticks after both agents are ready (the loser has respawned).
+- **The channel:** the plugin tells each agent over the plugin channel `horizon_rl:round`, one
+  UTF-8 JSON object per message:
+  - `{"v":1,"type":"start","round":12,"opponent":"Agent_2","max_ticks":2400}`, sent when the
+    agents are released;
+  - `{"v":1,"type":"end","round":12,"result":"win|loss|draw|timeout|abort","reason":"kill|double_ko|timeout|opponent_left","ticks":345}`.
+
+### Rounds (client and env)
+
+- **Client** (`game/rl/round.rs`, new; game.rs and remote.rs may not grow):
+  - It registers `horizon_rl:round` through `minecraft:register`. Bukkit sends nothing on a
+    channel the client didn't announce.
+  - It parses the messages into signals: `round`, `round_start`, `round_end`, one flag per
+    result (`round_win`, `round_loss`, `round_draw`, `round_timeout`, `round_abort`) and
+    `round_ticks`.
+  - It adds `round_time_left` (0..1) to the fair-play state, so the policy can see the cap
+    coming. The cap is a rule of the server.
+- **Env:** `FleetConfig.rounds` (default off: the stand-in server has no plugin). With it on:
+  - An episode is a round, for both agents of a pair. Win, loss, draw and timeout end it with
+    `terminated`. An abort, or a fault (kick, crash, hang), ends it with `truncated`.
+  - A death no longer ends an episode by itself. Until `start` arrives, the rows are inactive
+    (`valid` False) and the client holds no keys, as during a respawn today.
+- **Reward:** `rewards.Round`, a callable with every term a parameter, to be tuned during
+  training. Defaults:
+
+  | Event | Reward |
+  |---|---|
+  | win | +1 |
+  | loss | −1 |
+  | draw | 0 |
+  | timeout | −1, for both agents (discourages passive play) |
+  | abort | 0 |
+  | damage dealt | +0.01 per HP |
+  | damage taken | −0.01 per HP |
+
+  So 20 HP of damage is worth ±0.2, well below a win. `rewards.duel` stays.
+
+### The opponent pool
+
+- **Seats:** with N clients there are N/2 pairs. In each pair, one seat is the learner and the
+  other an opponent played by a frozen version.
+  - Only the learner rows reach the trainer: the SB3 env has N/2 envs.
+  - The learner keeps its seat: the arena is symmetrical.
+- **The draw:** each pair draws its own opponent, independently of the others, at every round
+  end. The new opponent plays the whole next round. The draw is proportional to the versions'
+  weights, so different pairs fight different versions at the same time.
+- **The pool file** (TOML, read once at the start; to change it, edit it and start again from the
+  saved model):
+
+  ```toml
+  snapshot_every = 100_000   # learner steps between snapshots of the learner into the pool
+  max_size = 50              # above it, a random run snapshot is dropped (never a listed version)
+  new_weight = 1.0           # weight of a snapshot taken during the run
+  newer_count_more = false   # the switch: true multiplies each newer snapshot's weight...
+  recency_factor = 1.1       # ...by this, compounding, relative to the previous snapshot
+
+  [[version]]                # versions you chose yourself, each with its weight
+  path = "runs/sword_a/snapshots/s001200000.zip"
+  weight = 2.0
+  ```
+
+  - No `[[version]]` listed: the pool starts with the untrained initial model.
+  - The listed versions must be fewer than `max_size`.
+  - Every version must have the run's observation and action spaces. The run checks that at the
+    start and refuses a version that doesn't match.
+  - A snapshot is an SB3 `.zip` in `runs/<name>/snapshots/`. A snapshot dropped from the pool
+    stays on disk, so it can be listed again in a later run.
+- **Opponent inference:**
+  - `pool.py`'s `OpponentPoolVecEnv` wraps `HorizonVecEnv(n=N)` as SB3's `VecEnv`. It builds
+    opponents' observations exactly like the learner's: the same view and normalisation, and
+    images with their channel axis.
+  - Each step it runs one batched, sampled (not deterministic) forward pass per version in play,
+    on `opponent_device`, then sends all N actions through the run's one action codec.
+  - Every pool version is loaded once. With images, versions are large: keep the pool small with
+    `max_size`. Nothing else changes between state, image and both.
+- **Stats:**
+  - The learner's results against each version (rounds, wins, losses, draws, timeouts) go to
+    TensorBoard and to `runs/<name>/pool_stats.csv`. These are the numbers to pick versions and
+    weights by for the next run.
+  - `ReleaseKeys` still releases all N agents during updates.
+
+### Steps (each with its tests)
+
+1. Client: channel registration and parsing, the round signals, `round_time_left`. This needs
+   the plugin built from the prompt. Until then, the Rust unit tests parse the JSON.
+2. Fleet and env: `rounds` mode, episodes as rounds, `rewards.Round`.
+3. `pool.py`: the pool file, weights, the newer-count-more switch, drops, snapshots. Unit tests,
+   no game.
+4. `OpponentPoolVecEnv`, the snapshot and stats callbacks, and `train_sb3.py --pool FILE --run NAME`.
+   Tests run against a fake fleet.
+5. End to end on a local Paper with the plugin: rounds, opponent swaps, stats; with state and
+   with image observations.
 
 ## Server compatibility
 

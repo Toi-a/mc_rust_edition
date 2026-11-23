@@ -255,6 +255,7 @@ own name:
 | `self_armor_item` | 4 | – |
 | `self_on_ground`, `self_sprinting`, `self_sneaking`, `self_using_item`, `self_alive` | 1 each | – (0 or 1) |
 | `self_hurt_time` | 1 | 10 ticks |
+| `round_time_left` | 1 | – (0..1: the share of the round's time cap left; 0 between rounds and without the round plugin) |
 | `target_present` | 1 | – |
 | `target_rel_pos`, `target_rel_vel` | 3, 3 | 8 blocks, 0.5 blocks per tick |
 | `target_distance` | 1 | 8 blocks |

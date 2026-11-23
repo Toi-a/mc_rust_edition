@@ -11,6 +11,8 @@
 //! - **Self**: what the HUD and F3 show about yourself (position, velocity, view, health,
 //!   absorption, food, armor bar, attack cooldown, hotbar, off hand, worn armor, movement flags,
 //!   using an item, the hurt flash). Saturation is out: vanilla doesn't show it.
+//! - **The round**: the share of its time cap left, from the server's round messages
+//!   (`round.rs`). The cap is the server's rule, so its players know it.
 //! - **Target**: what you see of another player: where it is and how it moves, where it looks,
 //!   its pose (sneaking, sprinting, using an item, swinging), the hurt flash, fire, and what it
 //!   holds and wears.
@@ -50,6 +52,8 @@ pub(super) struct SelfView {
     pub sneaking: bool,
     pub using_item: bool,
     pub hurt_time: i32,
+    /// The share of the round's time cap left (`round::Round::time_left`).
+    pub round_time_left: f32,
 }
 
 /// What the agent sees of its target. By construction it carries nothing a player can't see.
@@ -165,6 +169,7 @@ pub(super) fn encode(me: &SelfView, target: Option<&TargetView>, out: &mut [f32;
     put("self_using_item", &[flag(me.using_item)]);
     put("self_hurt_time", &[me.hurt_time as f32]);
     put("self_alive", &[flag(me.alive)]);
+    put("round_time_left", &[me.round_time_left]);
     let Some(t) = target else {
         return;
     };

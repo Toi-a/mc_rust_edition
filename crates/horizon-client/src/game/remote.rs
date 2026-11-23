@@ -3624,7 +3624,7 @@ impl Game<'_> {
     }
 
     pub(super) fn handle_packet(&mut self, packet: C) -> Result<()> {
-        self.native_client_packet(&packet);
+        self.client_packet_hooks(&packet);
         match packet {
             // ClientCommonPacketListenerImpl.handlePing runs on the game
             // thread, after all preceding packets (especially teleports).

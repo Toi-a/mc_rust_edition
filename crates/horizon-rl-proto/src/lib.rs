@@ -253,6 +253,9 @@ pub const STATE: &[Field] = &[
     f("self_using_item", 1),
     f("self_hurt_time", 1),
     f("self_alive", 1),
+    // The share of the round's time cap left: 1 at the start, 0 at the cap; 1 throughout a round
+    // without a cap, 0 between rounds and on a server without rounds.
+    f("round_time_left", 1),
     f("target_present", 1),
     f("target_rel_pos", 3),
     f("target_rel_vel", 3),
@@ -304,6 +307,19 @@ pub const INFO: &[Field] = &[
     f("disconnects_total", 1),
     // Joins the client started on its own after losing the connection.
     f("reconnects_total", 1),
+    // Rounds, from the server's plugin (`horizon_rl:round`): the last round started or ended (0:
+    // none yet), 1 while one runs, the messages this step (a start; an end and its result), and
+    // the length in server ticks of the round that ended this step.
+    f("round", 1),
+    f("in_round", 1),
+    f("round_start", 1),
+    f("round_end", 1),
+    f("round_win", 1),
+    f("round_loss", 1),
+    f("round_draw", 1),
+    f("round_timeout", 1),
+    f("round_abort", 1),
+    f("round_ticks", 1),
     // Image observations: the frame was drawn for this observation (0: the last one is kept),
     // and drawing plus reading it back took this long.
     f("frame_fresh", 1),
