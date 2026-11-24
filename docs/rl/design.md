@@ -399,7 +399,14 @@ The plugin's round manager does this. The prompt for it is `~/Projects/horizon-r
   weight = 2.0
   ```
 
-  - No `[[version]]` listed: the pool starts with the untrained initial model.
+  - No `[[version]]` listed: the pool starts with the untrained initial model, as the run's
+    first snapshot (step 0).
+  - Relative paths are read from the directory the trainer starts in. A file that is missing,
+    an unknown key, a weight of 0 or a version listed twice stops the run before it starts.
+  - With `newer_count_more`, the newest snapshot weighs `new_weight` and each older one
+    `1/recency_factor` of the next, counted over every snapshot of the run. So the listed versions'
+    share stays put as snapshots pile up, and dropping one changes no other weight.
+  - The snapshot dropped above `max_size` is never the one just taken.
   - The listed versions must be fewer than `max_size`.
   - Every version must have the run's observation and action spaces. The run checks that at the
     start and refuses a version that doesn't match.
@@ -424,8 +431,9 @@ The plugin's round manager does this. The prompt for it is `~/Projects/horizon-r
 1. Client: channel registration and parsing, the round signals, `round_time_left`. This needs
    the plugin built from the prompt. Until then, the Rust unit tests parse the JSON.
 2. Fleet and env: `rounds` mode, episodes as rounds, `rewards.Round`.
-3. `pool.py`: the pool file, weights, the newer-count-more switch, drops, snapshots. Unit tests,
-   no game.
+3. `pool.py` (done): the pool file (`PoolConfig.load`), weights, the draw, the newer-count-more
+   switch, drops, snapshots (`Pool`), the space check, the per-version stats (`Stats`, the CSV).
+   Unit tests in `python/tests/test_pool.py`, no game.
 4. `OpponentPoolVecEnv`, the snapshot and stats callbacks, and `train_sb3.py --pool FILE --run NAME`.
    Tests run against a fake fleet.
 5. End to end on a local Paper with the plugin: rounds, opponent swaps, stats; with state and
