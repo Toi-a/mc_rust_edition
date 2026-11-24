@@ -413,7 +413,8 @@ The plugin's round manager does this. The prompt for it is `~/Projects/horizon-r
   - A snapshot is an SB3 `.zip` in `runs/<name>/snapshots/`. A snapshot dropped from the pool
     stays on disk, so it can be listed again in a later run.
 - **Opponent inference:**
-  - `pool.py`'s `OpponentPoolVecEnv` wraps `HorizonVecEnv(n=N)` as SB3's `VecEnv`. It builds
+  - `pool_sb3.py`'s `OpponentPoolVecEnv` wraps `HorizonVecEnv(n=N)` as SB3's `VecEnv` (`pool.py`
+    keeps the bookkeeping that needs no SB3). It builds
     opponents' observations exactly like the learner's: the same view and normalisation, and
     images with their channel axis.
   - Each step it runs one batched, sampled (not deterministic) forward pass per version in play,
@@ -434,8 +435,12 @@ The plugin's round manager does this. The prompt for it is `~/Projects/horizon-r
 3. `pool.py` (done): the pool file (`PoolConfig.load`), weights, the draw, the newer-count-more
    switch, drops, snapshots (`Pool`), the space check, the per-version stats (`Stats`, the CSV).
    Unit tests in `python/tests/test_pool.py`, no game.
-4. `OpponentPoolVecEnv`, the snapshot and stats callbacks, and `train_sb3.py --pool FILE --run NAME`.
-   Tests run against a fake fleet.
+4. `OpponentPoolVecEnv`, the snapshot and stats callbacks, and `train_sb3.py --pool FILE --run NAME`
+   (done: `python/horizon_rl/pool_sb3.py`, `PoolSnapshots`, `PoolStats`; tests in
+   `python/tests/test_pool_sb3.py` against the fake fleet, PPO among them). A pair draws its next
+   opponent when the learner's episode ends; a version dropped from the pool plays its round out,
+   then is unloaded. A run started with `--load` counts its steps on, so its snapshots keep
+   distinct names. TensorBoard only when it is installed.
 5. End to end on a local Paper with the plugin: rounds, opponent swaps, stats; with state and
    with image observations.
 

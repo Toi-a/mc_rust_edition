@@ -19,6 +19,14 @@ hands out swords; on your server the kit does that.
 An episode is then a round, the reward is `rewards.Round` (the result, plus a little per health
 point dealt and taken), and the policy also observes the round's time left. The local stand-in
 server has no rounds.
+
+`--pool FILE --run NAME`: the learner fights frozen past versions of itself instead of its
+current self (docs/rl/design.md#the-opponent-pool). Agents 2k are the learner, 2k+1 its
+opponents, drawn from the pool file's versions and the run's snapshots
+(`runs/NAME/snapshots/`); the results per version go to `runs/NAME/pool_stats.csv` (and
+TensorBoard in `runs/NAME/tb` when it is installed), the model to `runs/NAME/final.zip`.
+
+    python python/examples/train_sb3.py --server HOST:PORT -n 16 --rounds --pool pool.toml --run sword_a
 """
 import argparse
 import sys
@@ -72,7 +80,14 @@ def main():
     ap.add_argument("--login-slot", "--hotbar", type=int, default=1, dest="login_slot",
                     help="the hotbar slot 1..9 each agent holds at login (the kit's sword: 1)")
     ap.add_argument("--rounds", action="store_true", help="the server's plugin runs 1v1 rounds")
+    ap.add_argument("--pool", help="a pool file (TOML): fight frozen past versions, not the current self")
+    ap.add_argument("--run", help="the run's name: its snapshots, stats and model go to runs/NAME/")
+    ap.add_argument("--opponent-device", default="cpu", help="where the pool's versions run")
     args = ap.parse_args()
+    if args.pool and not args.run:
+        ap.error("--pool needs --run NAME (where its snapshots go)")
+    if args.pool and not args.rounds:
+        print("note: without --rounds an episode ends at a death and no results are counted per version")
     if not args.server and not args.local:
         ap.error("--server HOST:PORT or --local")
     if args.rounds and args.local:
@@ -93,16 +108,36 @@ def main():
                 server.command(f"give {name} minecraft:diamond_sword")
         print("observation space:", env.single_observation_space)
         print("action space:", env.single_action_space, flush=True)
-        venv = VecMonitor(HorizonSB3VecEnv(env))
+        venv = HorizonSB3VecEnv(env)
+        callbacks = [ReleaseKeys()]
+        run_dir = Path("runs") / args.run if args.run else None
+        tensorboard = None
+        if args.pool:
+            from horizon_rl.pool import Pool, PoolConfig
+            from horizon_rl.pool_sb3 import OpponentPoolVecEnv, PoolSnapshots, PoolStats
+            pool = Pool(PoolConfig.load(args.pool))
+            venv = OpponentPoolVecEnv(venv, pool, opponent_device=args.opponent_device)
+            callbacks += [PoolSnapshots(run_dir), PoolStats(run_dir)]
+            print(f"pool: {len(pool)} versions listed, {venv.num_envs} learner seats", flush=True)
+        if run_dir is not None:
+            try:
+                import tensorboard  # noqa: F401
+                tensorboard = str(run_dir / "tb")
+            except ImportError:
+                pass
+        venv = VecMonitor(venv)
         policy = {"state": "MlpPolicy", "image": "CnnPolicy", "both": "MultiInputPolicy"}[args.obs]
         if args.load:
-            model = PPO.load(args.load, env=venv, device=args.device)
+            model = PPO.load(args.load, env=venv, device=args.device, tensorboard_log=tensorboard)
         else:
-            model = PPO(policy, venv, n_steps=args.rollout, batch_size=min(1024, args.rollout * args.n),
-                        n_epochs=4, gamma=0.99, ent_coef=0.01, verbose=1, device=args.device)
-        model.learn(args.steps, callback=ReleaseKeys())
-        model.save(args.save)
-        print("saved", args.save)
+            model = PPO(policy, venv, n_steps=args.rollout, batch_size=min(1024, args.rollout * venv.num_envs),
+                        n_epochs=4, gamma=0.99, ent_coef=0.01, verbose=1, device=args.device,
+                        tensorboard_log=tensorboard)
+        # A loaded model counts its steps on, so its snapshots don't take earlier ones' names.
+        model.learn(args.steps, callback=callbacks, reset_num_timesteps=not args.load)
+        save = run_dir / "final.zip" if run_dir is not None and args.save == ap.get_default("save") else args.save
+        model.save(save)
+        print("saved", save)
     finally:
         if env is not None:
             env.close()

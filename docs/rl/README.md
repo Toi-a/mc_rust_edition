@@ -231,6 +231,13 @@ stand-in server (`--server HOST:PORT` for a real one).
   the round plugin (episodes are rounds, `rewards.Round`, and the time left is observed). SB3 can't skip rows, so the
   ~20 steps an agent waits for its respawn are stored as steps of its next episode with reward
   0 (`info["valid"]` False).
+- **Opponent pool** (`--pool FILE --run NAME`, with `--rounds`): the learner (agents 2k) fights
+  frozen past versions of itself (agents 2k+1) instead of its current self; SB3 sees the N/2
+  learner seats. `horizon_rl.pool` reads the pool file (versions and weights, snapshots every
+  `snapshot_every` steps, `max_size`, `newer_count_more`: [design.md](design.md#the-opponent-pool)),
+  `horizon_rl.pool_sb3.OpponentPoolVecEnv` plays the opponents (one sampled forward pass per
+  version in play, on `--opponent-device`), `PoolSnapshots` saves `runs/NAME/snapshots/s<step>.zip`
+  and `PoolStats` the results per version to `runs/NAME/pool_stats.csv`.
 - **PettingZoo** (optional, `pip install pettingzoo`): `horizon_rl.parallel.HorizonParallelEnv`
   is a `ParallelEnv` over the same vector env, with the players' names as agents. An agent whose
   episode ended leaves `agents` and comes back by itself when its next one starts.
