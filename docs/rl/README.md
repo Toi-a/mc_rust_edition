@@ -333,6 +333,7 @@ python/.venv/bin/python python/tests/e2e_fleet.py        # M2: 4 fighting client
 python/.venv/bin/python python/tests/e2e_image.py        # M3: frames: sky/ground, the opponent, frame skip, HUD
 python/.venv/bin/python python/tests/e2e_shard.py        # model B: 4 image clients in 2 processes; kick, kill
 python/.venv/bin/python python/tests/e2e_gym.py          # M4: the Gymnasium envs on 4 + 1 real clients
+~/.cache/horizon-rl-sb3-venv/bin/python python/tests/e2e_pool.py --server HOST:PORT --obs state   # M6: PPO vs the pool on the round plugin's server (also --obs image)
 python/.venv/bin/python python/bench/throughput.py --ns 2,8,16,32   # the Gymnasium env: steps/s, CPU, RSS as N grows
 python/.venv/bin/python python/bench/fleet.py --ns 2,8,16,32   # the fleet below it (--infer-ms 10)
 python/.venv/bin/python python/bench/fleet.py --ns 8,32 --obs image --image 64x64   # the same with frames (+ GPU memory)

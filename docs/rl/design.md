@@ -442,7 +442,8 @@ The plugin's round manager does this. The prompt for it is `~/Projects/horizon-r
    then is unloaded. A run started with `--load` counts its steps on, so its snapshots keep
    distinct names. TensorBoard only when it is installed.
 5. End to end on a local Paper with the plugin: rounds, opponent swaps, stats; with state and
-   with image observations.
+   with image observations (done: `python/tests/e2e_pool.py`, 2026-11-24: 4 agents, PPO against
+   two hand-set versions and its own snapshots; state and image both pass at 19.8-19.9 steps/s).
 
 ## Server compatibility
 
