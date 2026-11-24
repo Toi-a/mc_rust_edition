@@ -1,0 +1,14 @@
+# The opponent pool of a training run: train_sb3.py --rounds --pool python/examples/pool.toml --run NAME
+# (docs/rl/design.md#the-opponent-pool). Read once at the start: to change it, edit it and start
+# again from the saved model (--load runs/NAME/final.zip).
+snapshot_every = 100_000   # learner steps between snapshots of the learner into the pool
+max_size = 50              # above it, a random run snapshot is dropped (never a listed version)
+new_weight = 1.0           # weight of a snapshot taken during the run
+newer_count_more = false   # true: each snapshot weighs recency_factor times the one before it
+recency_factor = 1.1
+
+# No [[version]] listed: the pool starts with the run's initial model. To add versions you chose
+# (same stage and observation as the run; paths from the folder the trainer starts in):
+# [[version]]
+# path = "runs/sword_a/snapshots/s001200000.zip"
+# weight = 2.0
